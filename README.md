@@ -12,23 +12,31 @@ The tool exposes a live-update WPF UI with every parameter bound to a slider or 
 
 Analogous to Thermo's PRM-Conductor but focused on the MacCoss lab's MTM work; descended from the prototype notebook at [`maccoss/targeted-modeling`](https://github.com/maccoss/targeted-modeling) (`gpf_coverage.ipynb`).
 
+## What it looks like
+
+Cadenza loads on the left, with every scheduling knob bound to a live control. Plots are tabbed on the right; the **summary strip** along the top of the plot area tracks library counts vs. scheduled counts in real time:
+
+<p align="center">
+  <img src="docs/screenshots/cadenza-ui.png" alt="Skyline Cadenza main UI on SEA-AD MTG dataset" width="900"/>
+</p>
+
+> Library 87,056 precursors / 78,498 peptides / 7,545 protein groups (SEA-AD MTG GPF), scheduled to 8,497 precursors / 8,481 peptides / 4,374 protein groups across 1,707 MTM slots (1,520 multiplexed). Peak concurrent load = 100 (the budget line in the Cycle load plot). Median peptides per kept protein = 2.0.
+
 ## What it produces
 
-Given a DIA-NN report, Cadenza scores each protein group's coverage potential and shows where the scheduler chose to spend the cycle budget. Per-protein dots are colored by the number of peptides actually scheduled for that protein:
+Each protein group is plotted by `log10(summed precursor intensity)` against rank and colored by the number of peptides the scheduler kept for it. High-intensity groups fill the scheduler easily (deep green = 5+ peptides each); low-intensity groups drop out (red / grey tail) when the cycle budget can't fit more. With a 100-slot budget across the SEA-AD MTG library, 4,374 / 7,545 protein groups are covered by at least one peptide and 3,171 are dropped:
 
 <p align="center">
-  <img src="docs/screenshots/protein-coverage.png" alt="Protein coverage scatter" width="780"/>
+  <img src="docs/screenshots/cadenza-protein-coverage.png" alt="Protein coverage by peptides scheduled" width="900"/>
 </p>
 
-At a glance: high-intensity proteins fill the scheduler easily (deep green left side of the curve = 5+ peptides each); low-intensity proteins drop out (red / grey tail) when the budget can't fit more. The summary strip at the top shows the live counts (precursors, peptides, protein groups, MTM slots, multiplexed slots, peak load, median peptides per protein).
-
-When launched from Skyline's `Tools > Skyline Cadenza...` menu, the connection comes up automatically and the status line under the Load buttons tracks the active document:
+The **m/z × RT heatmap** in scheduled mode draws every MTM slot as a polygon whose width = max(member m/z spread, PRM window cap) and height = padded firing window. Color encodes multiplex depth: blue = 1 precursor / slot (solo), through purple = 5+. This view is the fastest way to see whether the scheduler is multiplexing aggressively across the gradient or wasting slots on singletons:
 
 <p align="center">
-  <img src="docs/screenshots/skyline-connected.png" alt="Skyline connection status" width="640"/>
+  <img src="docs/screenshots/cadenza-mtm-isolation.png" alt="MTM isolation windows on m/z x RT heatmap" width="900"/>
 </p>
 
-> **Screenshots above are from an earlier session.** For the SEA-AD MTG dataset at `Y:\2026-05-SEA-AD-Pilot-MTG\Carafe-GPF-Brain-Search\diann_project\report.parquet`, the live numbers will be larger — point the *DIA-NN report.parquet* picker at that file and the loader stat line will read something like `Loaded N precursors / M peptides / K groups, P run(s). Fragments: DIA-NN report fragments.`. Replace these images with your own once you're satisfied with parameter choices.
+> 1,707 total slots, 3.0 Th cap, 0.7 Th solo width. Most slots are 2- or 3-precursor MTM (orange / yellow); the dense diagonal band reflects the elution-time vs. m/z correlation typical of tryptic libraries.
 
 ## Installation
 
