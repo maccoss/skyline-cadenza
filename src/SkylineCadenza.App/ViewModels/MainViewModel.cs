@@ -123,6 +123,13 @@ public partial class MainViewModel : ObservableObject
     /// <summary>True while a long Skyline operation is interruptible via <see cref="CancelSkylineLoadCommand"/>.</summary>
     [ObservableProperty] private bool _skylineLoadCancellable;
 
+    /// <summary>
+    /// Optional override for the Skyline RT column. When set, the loader
+    /// skips its auto-probe and uses this column name verbatim. Useful
+    /// for documents whose RT column isn't in the loader's default list.
+    /// </summary>
+    [ObservableProperty] private string _skylineRtColumnOverride = string.Empty;
+
     [RelayCommand]
     private void CancelSkylineLoad()
     {
@@ -344,7 +351,10 @@ public partial class MainViewModel : ObservableObject
                 StatusMessage = msg;
                 SkylineStatus = msg;
             });
-            var loadResult = await SkylineLibraryLoader.LoadAsync(_skylineSession!, progress: progress, cancellationToken: ct);
+            string? rtOverride = string.IsNullOrWhiteSpace(SkylineRtColumnOverride) ? null : SkylineRtColumnOverride;
+            var loadResult = await SkylineLibraryLoader.LoadAsync(
+                _skylineSession!, rtColumnOverride: rtOverride,
+                progress: progress, cancellationToken: ct);
             if (loadResult.Candidates.Count == 0)
             {
                 string empty = "Skyline: no candidates built from the document. "

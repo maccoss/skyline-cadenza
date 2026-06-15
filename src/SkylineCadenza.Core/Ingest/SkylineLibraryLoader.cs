@@ -61,17 +61,32 @@ public static class SkylineLibraryLoader
         SkylineSession session,
         double peakHalfWidthMin = 0.30,
         int pageSize = 10000,
+        string? rtColumnOverride = null,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        // Find a working RT column by trying each candidate. Skyline
-        // returns an error JSON-RPC response (caught as exception) when
-        // the column name isn't recognised.
-        string rtColumn = await ProbeRtColumnAsync(session, progress, cancellationToken)
-            ?? throw new InvalidOperationException(
-                "Skyline rejected every retention-time column candidate I tried "
-                + $"({string.Join(", ", RtColumnCandidates)}). "
-                + "Document needs a predicted or measured peptide RT column for the scheduler to run.");
+        // Find a working RT column. If the caller supplied an explicit
+        // column name (e.g. user typed it into the UI override), use that
+        // straight away. Otherwise probe the candidate list and require a
+        // non-zero value in the sample - Skyline will accept a column
+        // name and return all zeros when the document hasn't configured
+        // an RT calculator.
+        string rtColumn;
+        if (!string.IsNullOrWhiteSpace(rtColumnOverride))
+        {
+            rtColumn = rtColumnOverride!.Trim();
+            progress?.Report($"Skyline: using user-supplied RT column '{rtColumn}'.");
+        }
+        else
+        {
+            rtColumn = await ProbeRtColumnAsync(session, progress, cancellationToken)
+                ?? throw new InvalidOperationException(
+                    "Skyline rejected every retention-time column candidate I tried "
+                    + $"({string.Join(", ", RtColumnCandidates)}) or every value in the probe "
+                    + "sample was 0. Open the document grid in Skyline, find the column with "
+                    + "your predicted/library RT, and paste its invariant name into the "
+                    + "'RT column override' box.");
+        }
 
         var def = new ReportDefinition
         {
