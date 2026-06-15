@@ -438,33 +438,55 @@ public partial class MainWindow : Window
 
         var slots = _vm.ScheduleResult.Slots;
         int total = slots.Length;
-        var counts = new int[6]; // index 1..5; 5 = "5+"
-        foreach (var s in slots)
+        var memberCounts = new int[total];
+        int maxMembers = 0;
+        for (int i = 0; i < total; i++)
         {
-            int n = s.MemberIndices.Count;
-            counts[Math.Min(5, Math.Max(1, n))]++;
+            int n = slots[i].MemberIndices.Count;
+            if (n < 1) n = 1; // guard against empty slot
+            memberCounts[i] = n;
+            if (n > maxMembers) maxMembers = n;
+        }
+        if (maxMembers < 1) maxMembers = 1;
+
+        // Histogram counts[k] = number of slots with k members.
+        var hist = new int[maxMembers + 1];
+        for (int i = 0; i < total; i++) hist[memberCounts[i]]++;
+
+        // Stats.
+        int statMax = maxMembers;
+        double statMedian = ComputeMedian(memberCounts);
+        int statMode = 1;
+        int statModeFreq = -1;
+        for (int k = 1; k <= maxMembers; k++)
+        {
+            if (hist[k] > statModeFreq) { statModeFreq = hist[k]; statMode = k; }
         }
 
-        Color For(int level) => level switch
+        Color For(int level)
         {
-            1 => Color.FromHex("#3a6fb0"),
-            2 => Color.FromHex("#3a8c5c"),
-            3 => Color.FromHex("#d68f3a"),
-            4 => Color.FromHex("#b04c3a"),
-            _ => Color.FromHex("#7a2c8c"),
-        };
+            return level switch
+            {
+                1 => Color.FromHex("#3a6fb0"),
+                2 => Color.FromHex("#3a8c5c"),
+                3 => Color.FromHex("#d68f3a"),
+                4 => Color.FromHex("#b04c3a"),
+                5 => Color.FromHex("#7a2c8c"),
+                _ => DeepenPurple(level, maxMembers),
+            };
+        }
 
         var bars = new List<ScottPlot.Bar>();
-        for (int i = 1; i <= 5; i++)
+        for (int k = 1; k <= maxMembers; k++)
         {
-            double pct = total == 0 ? 0 : 100.0 * counts[i] / total;
+            double pct = total == 0 ? 0 : 100.0 * hist[k] / total;
             bars.Add(new ScottPlot.Bar
             {
-                Position = i,
+                Position = k,
                 Value = pct,
-                FillColor = For(i),
+                FillColor = For(k),
                 Size = 0.7,
-                Label = $"{counts[i]:n0}",
+                Label = $"{hist[k]:n0}",
             });
         }
         var bp = plt.Add.Bars(bars);
@@ -473,25 +495,52 @@ public partial class MainWindow : Window
         plt.XLabel("Precursors per slot");
         plt.YLabel("% of slots");
         string modeWord = _vm.Mode == SkylineCadenza.Core.Scheduling.AcquisitionMode.Prm ? "PRM" : "MTM";
-        plt.Title($"{modeWord} slot occupancy distribution (n = {total:n0} slots)");
+        plt.Title(
+            $"{modeWord} slot occupancy (n = {total:n0} slots; "
+            + $"max = {statMax}, median = {statMedian:0.0}, mode = {statMode})");
         ApplyPlotStyle(plt);
 
-        // Custom x-axis tick labels: "1", "2", "3", "4", "5+"
-        var ticks = new ScottPlot.Tick[]
-        {
-            new(1, "1"),
-            new(2, "2"),
-            new(3, "3"),
-            new(4, "4"),
-            new(5, "5+"),
-        };
+        // Tick at every integer 1..maxMembers. Bottom-axis labels collapse
+        // automatically when too dense; ScottPlot handles thinning.
+        var ticks = new ScottPlot.Tick[maxMembers];
+        for (int k = 1; k <= maxMembers; k++)
+            ticks[k - 1] = new(k, k.ToString());
         plt.Axes.Bottom.TickGenerator = new ScottPlot.TickGenerators.NumericManual(ticks);
-        plt.Axes.SetLimitsX(0.4, 5.6);
+        plt.Axes.SetLimitsX(0.4, maxMembers + 0.6);
         double yMax = 0;
-        for (int i = 1; i <= 5; i++)
-            if (total > 0 && 100.0 * counts[i] / total > yMax) yMax = 100.0 * counts[i] / total;
+        for (int k = 1; k <= maxMembers; k++)
+        {
+            double pct = total > 0 ? 100.0 * hist[k] / total : 0;
+            if (pct > yMax) yMax = pct;
+        }
         plt.Axes.SetLimitsY(0, Math.Max(yMax * 1.15, 5));
 
         OccupancyPlot.Refresh();
+    }
+
+    /// <summary>
+    /// Interpolate between the level-5 purple (#7a2c8c) and a near-black
+    /// violet (#2a0c3c) for levels > 5; used so deeply-multiplexed slots
+    /// remain visually distinguishable from the level-5 baseline.
+    /// </summary>
+    private static Color DeepenPurple(int level, int maxLevel)
+    {
+        int extra = Math.Max(0, level - 5);
+        int maxExtra = Math.Max(1, maxLevel - 5);
+        double t = Math.Min(1.0, extra / (double)maxExtra);
+        int r = (int)Math.Round(0x7a - t * (0x7a - 0x2a));
+        int g = (int)Math.Round(0x2c - t * (0x2c - 0x0c));
+        int b = (int)Math.Round(0x8c - t * (0x8c - 0x3c));
+        return Color.FromHex($"#{r:x2}{g:x2}{b:x2}");
+    }
+
+    private static double ComputeMedian(int[] values)
+    {
+        if (values.Length == 0) return 0;
+        var sorted = (int[])values.Clone();
+        Array.Sort(sorted);
+        int mid = sorted.Length / 2;
+        if (sorted.Length % 2 == 1) return sorted[mid];
+        return (sorted[mid - 1] + sorted[mid]) / 2.0;
     }
 }
