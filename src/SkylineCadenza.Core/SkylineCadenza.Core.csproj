@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Windows-targeted because the SkylineTool RPC client uses
+         System.IO.Pipes named-pipe APIs that are Windows-only at runtime. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The vendored SkylineTool sources under external/SkylineTool/ are
+         link-compiled into this project verbatim. They were authored for
+         .NET Framework 4.7.2 and predate nullable reference types, so we
+         keep nullable off project-wide. Our own files use ! / is null
+         checks where it matters. -->
+    <Nullable>disable</Nullable>
+    <RootNamespace>SkylineCadenza.Core</RootNamespace>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Parquet.Net" Version="5.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SkylineCadenza.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Vendored Skyline JSON-RPC client sources. The originals live in
+         pwiz_tools/Skyline/SkylineTool/ in the ProteoWizard repo; the
+         copies under external/ are Apache 2.0 and link-compiled into Core
+         exactly the way pwiz's SkylineMcpServer.csproj does. -->
+    <Compile Include="..\..\external\SkylineTool\SkylineJsonToolClient.cs" Link="SkylineRpc\SkylineJsonToolClient.cs" />
+    <Compile Include="..\..\external\SkylineTool\IJsonToolService.cs" Link="SkylineRpc\IJsonToolService.cs" />
+    <Compile Include="..\..\external\SkylineTool\JsonToolConstants.cs" Link="SkylineRpc\JsonToolConstants.cs" />
+    <Compile Include="..\..\external\SkylineTool\JsonToolModels.cs" Link="SkylineRpc\JsonToolModels.cs" />
+  </ItemGroup>
+
+</Project>

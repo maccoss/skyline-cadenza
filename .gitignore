@@ -1,0 +1,27 @@
+## Build output
+bin/
+obj/
+out/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+
+## VS / Rider
+.vs/
+.idea/
+*.swp
+
+## Test results
+TestResults/
+coverage*
+
+## Publish artifacts
+publish/
+*.zip
+
+## Local environment
+.env
+.venv/
+__pycache__/
+*.py[cod]

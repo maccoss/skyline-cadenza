@@ -1,0 +1,498 @@
+using System.Threading;
+
+namespace SkylineCadenza.Core.Scheduling;
+
+/// <summary>
+/// Greedy load-balanced MTM target selection. Direct port of
+/// <c>schedule_targets</c> from
+/// <c>targeted-modeling/gpf_coverage.ipynb</c> (cell <c>cc94d293</c>).
+/// </summary>
+/// <remarks>
+/// Two passes:
+/// <list type="number">
+/// <item>
+/// <b>Cover</b>: process protein groups in order of ascending candidate
+/// count; for each, attempt the best peptide, drop it if it doesn't fit,
+/// try the next, etc., until one succeeds or the group is exhausted.
+/// Smallest groups are tried first because they have no fallbacks.
+/// </item>
+/// <item>
+/// <b>Load up</b>: round-robin over already-covered groups, attempting to
+/// add the next-best peptide. Loop until no group adds anything.
+/// </item>
+/// </list>
+///
+/// A peptide fits if it can either join an existing slot (m/z range stays
+/// within window cap, RT co-elution intersection stays non-empty, top-4
+/// fragments don't clash, and any RT extension keeps every newly-covered
+/// bin within budget) or open a new slot inside budget. The intersection-
+/// based co-elution requirement enforces "all multiplexed precursors are
+/// genuinely sampled at the same instant" rather than just having
+/// touching bounding boxes.
+/// </remarks>
+public static class Scheduler
+{
+    public static ScheduleResult Run(
+        IReadOnlyList<Candidate> candidates,
+        SchedulingParameters parameters,
+        CancellationToken cancellationToken = default)
+    {
+        if (candidates.Count == 0)
+        {
+            return new ScheduleResult
+            {
+                ScheduledIndices = Array.Empty<int>(),
+                ScheduledSlotIds = Array.Empty<int>(),
+                Slots = Array.Empty<Slot>(),
+                RtGrid = Array.Empty<double>(),
+                SlotCountCurve = Array.Empty<int>(),
+                ProteinGroupsCovered = 0,
+            };
+        }
+
+        double padMin = parameters.FiringPadMin;
+        double rtLo = double.PositiveInfinity;
+        double rtHi = double.NegativeInfinity;
+        foreach (var c in candidates)
+        {
+            if (c.RtStart < rtLo) rtLo = c.RtStart;
+            if (c.RtStop > rtHi) rtHi = c.RtStop;
+        }
+        rtLo = rtLo - padMin - 0.1;
+        rtHi = rtHi + padMin + 0.1;
+        int nBins = (int)Math.Ceiling((rtHi - rtLo) / parameters.RtBinMin);
+        var slotsPerBin = new int[nBins];
+
+        (int a, int b) RtToBinRange(double rtStart, double rtStop)
+        {
+            int a = (int)((rtStart - rtLo) / parameters.RtBinMin);
+            if (a < 0) a = 0;
+            int b = (int)((rtStop - rtLo) / parameters.RtBinMin) + 1;
+            if (b > nBins) b = nBins;
+            return (a, b);
+        }
+
+        int RangeMax(int[] arr, int a, int b)
+        {
+            int max = int.MinValue;
+            for (int i = a; i < b; i++)
+                if (arr[i] > max) max = arr[i];
+            return max;
+        }
+
+        void RangeAddOne(int[] arr, int a, int b)
+        {
+            for (int i = a; i < b; i++) arr[i]++;
+        }
+
+        var slots = new List<Slot>();
+        var slotByMzBin = new Dictionary<int, List<int>>();
+
+        void RegisterSlotMzBins(int sid, double mzMin, double mzMax)
+        {
+            int lo = (int)Math.Floor(mzMin);
+            int hi = (int)Math.Floor(mzMax);
+            for (int b = lo; b <= hi; b++)
+            {
+                if (!slotByMzBin.TryGetValue(b, out var list))
+                {
+                    list = new List<int>();
+                    slotByMzBin[b] = list;
+                }
+                if (!list.Contains(sid)) list.Add(sid);
+            }
+        }
+
+        // Try to schedule a single precursor. Returns the slot id it was
+        // assigned to, or -1 if it didn't fit.
+        int TrySchedule(int candIndex)
+        {
+            var prec = candidates[candIndex];
+            double mz = prec.PrecursorMz;
+            double rtStart = prec.RtStart;
+            double rtStop = prec.RtStop;
+            double rtStartPad = rtStart - padMin;
+            double rtStopPad = rtStop + padMin;
+            var frags = prec.Top4Fragments;
+            double windowTh = parameters.Mode == AcquisitionMode.Prm ? 0.0 : parameters.IsolationWindowTh;
+
+            if (parameters.Mode == AcquisitionMode.Mtm && frags.Length > 0)
+            {
+                int mzBinLo = (int)Math.Floor(mz - windowTh);
+                int mzBinHi = (int)Math.Floor(mz + windowTh);
+                var seen = new HashSet<int>();
+                for (int bin = mzBinLo; bin <= mzBinHi; bin++)
+                {
+                    if (!slotByMzBin.TryGetValue(bin, out var sids)) continue;
+                    foreach (int sid in sids)
+                    {
+                        if (!seen.Add(sid)) continue;
+                        var slot = slots[sid];
+
+                        double newMzMin = Math.Min(slot.MzMin, mz);
+                        double newMzMax = Math.Max(slot.MzMax, mz);
+                        if (newMzMax - newMzMin > windowTh) continue;
+
+                        // Strict co-elution: intersection of unpadded peak
+                        // ranges must remain non-empty.
+                        double newCoStart = Math.Max(slot.CoStart, rtStart);
+                        double newCoStop = Math.Min(slot.CoStop, rtStop);
+                        if (newCoStart >= newCoStop) continue;
+
+                        if (FragmentClash.AnyWithin(frags, slot.Fragments, parameters.FragmentTolDa))
+                            continue;
+
+                        // Same-charge constraint: skip slots whose existing
+                        // members carry a different precursor charge. With
+                        // SameChargePerSlot every member shares the first
+                        // member's charge, so one comparison is enough.
+                        if (parameters.ChargeHandling == ChargeHandling.SameChargePerSlot
+                            && slot.MemberIndices.Count > 0
+                            && candidates[slot.MemberIndices[0]].PrecursorCharge != prec.PrecursorCharge)
+                            continue;
+
+                        // Extending the padded firing window. The set of bins
+                        // already incremented for this slot is the half-open
+                        // range [oldA, oldB); new bins to check + increment
+                        // are everything in [newA, newB) outside [oldA, oldB).
+                        double newRtStartPad = Math.Min(slot.RtStart, rtStartPad);
+                        double newRtStopPad = Math.Max(slot.RtStop, rtStopPad);
+                        var (oldA, oldB) = RtToBinRange(slot.RtStart, slot.RtStop);
+                        var (extA, extB) = RtToBinRange(newRtStartPad, newRtStopPad);
+                        int extLoFrom = extA, extLoTo = Math.Min(oldA, extB);
+                        int extHiFrom = Math.Max(oldB, extA), extHiTo = extB;
+                        if (extLoFrom < extLoTo && RangeMax(slotsPerBin, extLoFrom, extLoTo) + 1 > parameters.CycleBudget)
+                            continue;
+                        if (extHiFrom < extHiTo && RangeMax(slotsPerBin, extHiFrom, extHiTo) + 1 > parameters.CycleBudget)
+                            continue;
+                        if (extLoFrom < extLoTo) RangeAddOne(slotsPerBin, extLoFrom, extLoTo);
+                        if (extHiFrom < extHiTo) RangeAddOne(slotsPerBin, extHiFrom, extHiTo);
+                        slot.RtStart = newRtStartPad;
+                        slot.RtStop = newRtStopPad;
+                        slot.CoStart = newCoStart;
+                        slot.CoStop = newCoStop;
+                        slot.MzMin = newMzMin;
+                        slot.MzMax = newMzMax;
+                        var merged = new double[slot.Fragments.Length + frags.Length];
+                        Array.Copy(slot.Fragments, merged, slot.Fragments.Length);
+                        Array.Copy(frags, 0, merged, slot.Fragments.Length, frags.Length);
+                        Array.Sort(merged);
+                        slot.Fragments = merged;
+                        slot.MemberIndices.Add(candIndex);
+                        RegisterSlotMzBins(sid, newMzMin, newMzMax);
+                        return sid;
+                    }
+                }
+            }
+
+            // No existing slot accepted - open a new one if there's budget.
+            var (newA, newB) = RtToBinRange(rtStartPad, rtStopPad);
+            if (newA >= newB) return -1;
+            if (RangeMax(slotsPerBin, newA, newB) + 1 > parameters.CycleBudget) return -1;
+            RangeAddOne(slotsPerBin, newA, newB);
+            int newSid = slots.Count;
+            var newSlot = new Slot
+            {
+                Id = newSid,
+                MzMin = mz,
+                MzMax = mz,
+                RtStart = rtStartPad,
+                RtStop = rtStopPad,
+                CoStart = rtStart,
+                CoStop = rtStop,
+                Fragments = frags.Length == 0 ? Array.Empty<double>() : (double[])frags.Clone(),
+            };
+            newSlot.MemberIndices.Add(candIndex);
+            slots.Add(newSlot);
+            RegisterSlotMzBins(newSid, mz, mz);
+            return newSid;
+        }
+
+        // Group candidates by protein, then optionally filter by target list.
+        var groupToRanked = new Dictionary<string, List<int>>();
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var c = candidates[i];
+            if (!groupToRanked.TryGetValue(c.ProteinGroup, out var list))
+            {
+                list = new List<int>();
+                groupToRanked[c.ProteinGroup] = list;
+            }
+            list.Add(i);
+        }
+
+        bool hasTargets = parameters.TargetProteins.Count > 0;
+        if (hasTargets && parameters.TargetMode == TargetListMode.Exclusive)
+        {
+            var keep = new Dictionary<string, List<int>>();
+            foreach (var (group, idxs) in groupToRanked)
+            {
+                if (parameters.TargetProteins.Contains(group))
+                    keep[group] = idxs;
+            }
+            groupToRanked = keep;
+        }
+
+        // Rank peptides within each group: unique-before-razor tier, then by
+        // the user-selected metric (descending quantity / ascending q-value).
+        foreach (var kv in groupToRanked)
+        {
+            kv.Value.Sort((x, y) =>
+            {
+                var cx = candidates[x];
+                var cy = candidates[y];
+                int tierX = cx.PeptideType == "unique" ? 0 : cx.PeptideType == "razor" ? 1 : 2;
+                int tierY = cy.PeptideType == "unique" ? 0 : cy.PeptideType == "razor" ? 1 : 2;
+                if (tierX != tierY) return tierX - tierY;
+                return parameters.PeptideRanking switch
+                {
+                    PeptidePriority.QValue => cx.QValue.CompareTo(cy.QValue),
+                    _ => cy.PrecursorQuantity.CompareTo(cx.PrecursorQuantity),
+                };
+            });
+        }
+
+        // Group ordering. The default heuristic (smallest groups first to
+        // cover fragile ones) still applies as a tiebreaker, but the
+        // primary key is the user-selected priority:
+        //
+        //   ProvidedListOrder - target-list members go first in insertion
+        //     order; off-list groups follow in the heuristic order if
+        //     TargetMode = FirstThenFill.
+        //   SummedIntensity   - sum of Precursor.Quantity over each group.
+        //   ProteinQValue     - best (smallest non-NaN) PG.Q.Value.
+        //
+        // FirstThenFill always promotes target-list members to the head of
+        // the order regardless of priority key.
+        var groupSummedIntensity = groupToRanked.ToDictionary(
+            kv => kv.Key,
+            kv => kv.Value.Sum(i => candidates[i].PrecursorQuantity));
+        var groupBestQ = groupToRanked.ToDictionary(
+            kv => kv.Key,
+            kv =>
+            {
+                double best = double.PositiveInfinity;
+                foreach (var i in kv.Value)
+                {
+                    double pq = candidates[i].ProteinQValue;
+                    if (!double.IsNaN(pq) && pq < best) best = pq;
+                }
+                return best;
+            });
+
+        int TargetRank(string group)
+        {
+            if (!hasTargets) return 0;
+            if (parameters.TargetProteins.Contains(group)) return 0;
+            return 1;
+        }
+
+        int PriorityRank(string group)
+        {
+            return parameters.ProteinRanking switch
+            {
+                ProteinPriority.SummedIntensity =>
+                    -(int)Math.Min(groupSummedIntensity[group] / 1e3, int.MaxValue),
+                ProteinPriority.ProteinQValue =>
+                    (int)Math.Min(groupBestQ[group] * 1e6, int.MaxValue),
+                ProteinPriority.ProvidedListOrder =>
+                    // Without a positional input we treat it as alphabetical;
+                    // the UI passes targets as an ordered list and that order
+                    // is preserved by the in-target / out-of-target split.
+                    0,
+                _ => 0,
+            };
+        }
+
+        var groupOrder = groupToRanked.Keys.ToList();
+        groupOrder.Sort((g1, g2) =>
+        {
+            int t = TargetRank(g1).CompareTo(TargetRank(g2));
+            if (t != 0) return t;
+            int p = PriorityRank(g1).CompareTo(PriorityRank(g2));
+            if (p != 0) return p;
+            int c = groupToRanked[g1].Count.CompareTo(groupToRanked[g2].Count);
+            if (c != 0) return c;
+            return string.CompareOrdinal(g1, g2);
+        });
+
+        var scheduledToSlot = new Dictionary<int, int>();
+        var groupQueueCursor = new Dictionary<string, int>(groupOrder.Count);
+        var scheduledPerGroup = new Dictionary<string, int>(groupOrder.Count);
+        foreach (var g in groupOrder) { groupQueueCursor[g] = 0; scheduledPerGroup[g] = 0; }
+        var coveredGroups = new HashSet<string>();
+        int maxPerGroup = Math.Max(1, parameters.MaxPeptidesPerProtein);
+
+        // Pass 1: cover one peptide per group.
+        foreach (var g in groupOrder)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var queue = groupToRanked[g];
+            int cursor = groupQueueCursor[g];
+            while (cursor < queue.Count)
+            {
+                int candIdx = queue[cursor];
+                int sid = TrySchedule(candIdx);
+                cursor++;
+                if (sid >= 0)
+                {
+                    scheduledToSlot[candIdx] = sid;
+                    coveredGroups.Add(g);
+                    scheduledPerGroup[g]++;
+                    break;
+                }
+            }
+            groupQueueCursor[g] = cursor;
+        }
+
+        // Pass 2+: load-up loop. Optional. Caps at MaxPeptidesPerProtein
+        // peptides per group so single intense proteins don't monopolise
+        // the budget while smaller ones miss out.
+        if (parameters.EnableLoadBalancing)
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                bool changed = false;
+                foreach (var g in groupOrder)
+                {
+                    if (!coveredGroups.Contains(g)) continue;
+                    if (scheduledPerGroup[g] >= maxPerGroup) continue;
+                    var queue = groupToRanked[g];
+                    int cursor = groupQueueCursor[g];
+                    while (cursor < queue.Count)
+                    {
+                        int candIdx = queue[cursor];
+                        int sid = TrySchedule(candIdx);
+                        cursor++;
+                        if (sid >= 0)
+                        {
+                            scheduledToSlot[candIdx] = sid;
+                            scheduledPerGroup[g]++;
+                            changed = true;
+                            break;
+                        }
+                    }
+                    groupQueueCursor[g] = cursor;
+                }
+                if (!changed) break;
+            }
+        }
+
+        // Min-peptides-per-protein enforcement: drop any group that
+        // didn't reach the minimum and free the slot capacity its peptides
+        // were holding. This runs once (not iterated) - in practice this
+        // produces the user's expected "min=2 means every kept group has
+        // >=2 peptides" semantics.
+        if (parameters.MinPeptidesPerProtein > 1)
+        {
+            var groupCounts = new Dictionary<string, int>();
+            foreach (var kv in scheduledToSlot)
+            {
+                string g = candidates[kv.Key].ProteinGroup;
+                groupCounts[g] = (groupCounts.TryGetValue(g, out int n) ? n : 0) + 1;
+            }
+            var failedGroups = new HashSet<string>();
+            foreach (var kv in groupCounts)
+                if (kv.Value < parameters.MinPeptidesPerProtein) failedGroups.Add(kv.Key);
+
+            if (failedGroups.Count > 0)
+            {
+                // Drop scheduled entries belonging to failed groups.
+                var keptScheduled = new Dictionary<int, int>();
+                foreach (var kv in scheduledToSlot)
+                    if (!failedGroups.Contains(candidates[kv.Key].ProteinGroup))
+                        keptScheduled[kv.Key] = kv.Value;
+                scheduledToSlot = keptScheduled;
+                foreach (var g in failedGroups) coveredGroups.Remove(g);
+
+                // Group the kept entries by their (old) slot id so we can
+                // rebuild slots with only the kept members and recompute
+                // each slot's bounding box, co-elution window and fragment
+                // set from scratch.
+                var keptBySlot = new Dictionary<int, List<int>>();
+                foreach (var kv in scheduledToSlot)
+                {
+                    if (!keptBySlot.TryGetValue(kv.Value, out var list))
+                    {
+                        list = new List<int>();
+                        keptBySlot[kv.Value] = list;
+                    }
+                    list.Add(kv.Key);
+                }
+
+                var rebuiltSlots = new List<Slot>();
+                var oldToNewSid = new Dictionary<int, int>();
+                foreach (var oldSlot in slots)
+                {
+                    if (!keptBySlot.TryGetValue(oldSlot.Id, out var members)) continue;
+                    int newSid = rebuiltSlots.Count;
+                    oldToNewSid[oldSlot.Id] = newSid;
+                    var fresh = new Slot { Id = newSid };
+                    fresh.MemberIndices.AddRange(members);
+                    double mzMin = double.PositiveInfinity, mzMax = double.NegativeInfinity;
+                    double coStart = double.NegativeInfinity, coStop = double.PositiveInfinity;
+                    double padStart = double.PositiveInfinity, padStop = double.NegativeInfinity;
+                    var mergedFrags = new List<double>();
+                    foreach (var idx in members)
+                    {
+                        var c = candidates[idx];
+                        if (c.PrecursorMz < mzMin) mzMin = c.PrecursorMz;
+                        if (c.PrecursorMz > mzMax) mzMax = c.PrecursorMz;
+                        if (c.RtStart > coStart) coStart = c.RtStart;
+                        if (c.RtStop < coStop) coStop = c.RtStop;
+                        double ps = c.RtStart - padMin, pe = c.RtStop + padMin;
+                        if (ps < padStart) padStart = ps;
+                        if (pe > padStop) padStop = pe;
+                        mergedFrags.AddRange(c.Top4Fragments);
+                    }
+                    fresh.MzMin = mzMin;
+                    fresh.MzMax = mzMax;
+                    fresh.CoStart = coStart;
+                    fresh.CoStop = coStop;
+                    fresh.RtStart = padStart;
+                    fresh.RtStop = padStop;
+                    mergedFrags.Sort();
+                    fresh.Fragments = mergedFrags.ToArray();
+                    rebuiltSlots.Add(fresh);
+                }
+
+                // Remap scheduled slot ids to the rebuilt slot list.
+                foreach (var key in scheduledToSlot.Keys.ToList())
+                    scheduledToSlot[key] = oldToNewSid[scheduledToSlot[key]];
+                slots = rebuiltSlots;
+
+                // Recompute the concurrent-slot occupancy curve from the
+                // rebuilt slots so peak load reflects the surviving
+                // schedule (not the budget that was spent and then freed).
+                Array.Clear(slotsPerBin);
+                foreach (var slot in slots)
+                {
+                    var (a, b) = RtToBinRange(slot.RtStart, slot.RtStop);
+                    for (int i = a; i < b; i++) slotsPerBin[i]++;
+                }
+            }
+        }
+
+        var scheduledIndices = scheduledToSlot.Keys.ToArray();
+        var scheduledSlotIds = new int[scheduledIndices.Length];
+        for (int i = 0; i < scheduledIndices.Length; i++)
+            scheduledSlotIds[i] = scheduledToSlot[scheduledIndices[i]];
+
+        var rtGrid = new double[nBins];
+        for (int i = 0; i < nBins; i++)
+            rtGrid[i] = rtLo + (i + 0.5) * parameters.RtBinMin;
+
+        int proteinsCovered = coveredGroups.Count;
+
+        return new ScheduleResult
+        {
+            ScheduledIndices = scheduledIndices,
+            ScheduledSlotIds = scheduledSlotIds,
+            Slots = slots.ToArray(),
+            RtGrid = rtGrid,
+            SlotCountCurve = slotsPerBin,
+            ProteinGroupsCovered = proteinsCovered,
+        };
+    }
+}

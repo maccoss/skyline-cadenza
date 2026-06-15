@@ -1,0 +1,10 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- Allows cross-compiling Windows-targeted projects (net8.0-windows,
+         WPF) on non-Windows hosts (WSL / CI agents). Has no effect on
+         Windows. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+</Project>
