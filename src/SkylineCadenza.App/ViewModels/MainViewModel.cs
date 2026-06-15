@@ -278,7 +278,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void UpdateSkyline()
+    private async Task UpdateSkylineAsync()
     {
         if (_candidates is null || ScheduleResult is null)
         {
@@ -297,23 +297,57 @@ public partial class MainViewModel : ObservableObject
         // via RunCommand; that hits the same code path Skyline uses for
         // the UI's Edit > Insert > Transition List flow and lands rows in
         // the protein/peptide tree.
+        //
+        // The Skyline-side import is single-threaded and rebuilds the
+        // document tree per protein - on a fully-loaded SEA-AD schedule
+        // (~4k proteins, ~30k transitions) this can take 30-60 minutes.
+        // We run it on a background thread so the Cadenza UI stays
+        // responsive, and start a periodic status updater so the user
+        // sees Cadenza isn't hung. Live import progress is in Skyline's
+        // Immediate Window (View > Other Windows > Immediate Window).
         string? tempPath = null;
+        var pushStart = DateTimeOffset.UtcNow;
+        using var heartbeatCts = new CancellationTokenSource();
         try
         {
-            StatusMessage = "Pushing scheduled targets to Skyline...";
             var csv = PeptideTransitionListBuilder.Build(_candidates, ScheduleResult);
+            int rowCount = csv.AsSpan().Count('\n') - 1;
             tempPath = Path.Combine(Path.GetTempPath(),
                 $"cadenza-targets-{Guid.NewGuid():N}.csv");
-            File.WriteAllText(tempPath, csv);
-            string output = _skylineSession.Execute(c => c.RunCommand(new[]
+            await File.WriteAllTextAsync(tempPath, csv);
+
+            // Observed rate on SEA-AD: roughly 10 transition rows / sec
+            // through Skyline's MassListImporter. Used as a rough ETA.
+            const double rowsPerSec = 10.0;
+            double etaMin = rowCount / rowsPerSec / 60.0;
+            string etaText = etaMin < 1.0
+                ? $"~{rowCount / rowsPerSec:0} s"
+                : $"~{etaMin:0.0} min";
+
+            StatusMessage =
+                $"Pushing {ScheduleResult.ScheduledIndices.Length:n0} precursors "
+                + $"({rowCount:n0} transition rows) to Skyline. ETA {etaText}. "
+                + "Live progress is in Skyline's Immediate Window.";
+
+            // Heartbeat task updates the status with elapsed time every
+            // 10 s while the import runs so the user can tell Cadenza is
+            // still alive even though the RunCommand call is opaque.
+            var heartbeat = HeartbeatStatus(pushStart, rowCount, rowsPerSec, heartbeatCts.Token);
+
+            string output = await Task.Run(() => _skylineSession.Execute(c => c.RunCommand(new[]
             {
                 "--import-transition-list=" + tempPath,
-            }));
+            })));
+
+            heartbeatCts.Cancel();
+            try { await heartbeat; } catch (OperationCanceledException) { }
+
             string head = string.IsNullOrWhiteSpace(output)
                 ? "(no output)"
                 : output.Length > 400 ? output.Substring(0, 400) + "..." : output;
-            StatusMessage = $"Pushed {ScheduleResult.ScheduledIndices.Length:n0} precursors via --import-transition-list. "
-                + $"Skyline: {head}";
+            var elapsed = DateTimeOffset.UtcNow - pushStart;
+            StatusMessage = $"Pushed {ScheduleResult.ScheduledIndices.Length:n0} precursors "
+                + $"({rowCount:n0} rows) in {elapsed.TotalMinutes:0.0} min. Skyline: {head}";
         }
         catch (Exception ex)
         {
@@ -321,11 +355,35 @@ public partial class MainViewModel : ObservableObject
         }
         finally
         {
+            heartbeatCts.Cancel();
             if (tempPath is not null)
             {
                 try { File.Delete(tempPath); } catch { /* best effort */ }
             }
         }
+    }
+
+    /// <summary>
+    /// Updates <see cref="StatusMessage"/> every 10 s while a long Skyline
+    /// import is in flight. Lets the user see progress relative to the ETA
+    /// even though <c>RunCommand</c> returns only on completion.
+    /// </summary>
+    private async Task HeartbeatStatus(DateTimeOffset start, int rowCount, double rowsPerSec, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                var elapsed = DateTimeOffset.UtcNow - start;
+                double pctEst = Math.Min(99, elapsed.TotalSeconds * rowsPerSec / Math.Max(1, rowCount) * 100);
+                StatusMessage =
+                    $"Skyline import in flight: elapsed {elapsed.TotalMinutes:0.0} min, "
+                    + $"estimated {pctEst:0}% of {rowCount:n0} rows. "
+                    + "Live per-protein progress in Skyline's Immediate Window.";
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     [RelayCommand]
