@@ -14,7 +14,11 @@ out/
 
 ## Test results
 TestResults/
-coverage*
+coverage.xml
+coverage.json
+coverage.cobertura.xml
+coverage.opencover.xml
+/coverage/
 
 ## Publish artifacts
 publish/
