@@ -324,25 +324,116 @@ public static class Scheduler
         int maxPerGroup = Math.Max(1, parameters.MaxPeptidesPerProtein);
 
         // Pass 1: cover one peptide per group.
+        //
+        // Both strategies implement the published webinar's RT-budget
+        // rule (no more than CycleBudget concurrent precursors at any RT
+        // bin) and both produce the slide-9 outcome of "pick a
+        // lower-score peptide when the best-score peptide can't fit."
+        // The difference is when the budget check happens:
+        //
+        // - Reactive (RtAwareCoverSelection = false): walk the static
+        //   intensity-sorted queue; TrySchedule fails when the best
+        //   peptide's RT bin is at budget; fall back to the next
+        //   peptide in score order. Slide 9 exactly.
+        //
+        // - Look-ahead (default): for each protein, evaluate every
+        //   peptide in its queue against the current slotsPerBin
+        //   saturation and pick the one with the most headroom before
+        //   calling TrySchedule. Spreads first peptides across the
+        //   gradient so the score-bin clumping that would have to
+        //   trigger fallbacks in later proteins is avoided up front.
+        //   When two RT regions are equally crowded, falls back to
+        //   static intensity / q-value order.
+        //
+        // Look-ahead cover deliberately doesn't advance the cursor
+        // past unchosen peptides - they weren't tried, just considered
+        // and skipped. Load-up walks from cursor=0 and skips
+        // already-scheduled candidates so unchosen peptides remain
+        // available for the load-up phase.
         foreach (var g in groupOrder)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var queue = groupToRanked[g];
             int cursor = groupQueueCursor[g];
-            while (cursor < queue.Count)
+            int chosenSid = -1;
+            int chosenCandIdx = -1;
+
+            if (parameters.RtAwareCoverSelection)
             {
-                int candIdx = queue[cursor];
-                int sid = TrySchedule(candIdx);
-                cursor++;
-                if (sid >= 0)
+                int bestCandIdx = -1;
+                int bestMaxLoad = int.MaxValue;
+                int bestTieRank = int.MaxValue;
+                for (int q = cursor; q < queue.Count; q++)
                 {
-                    scheduledToSlot[candIdx] = sid;
-                    coveredGroups.Add(g);
-                    scheduledPerGroup[g]++;
-                    break;
+                    int candIdx = queue[q];
+                    var c = candidates[candIdx];
+                    double padStart = c.RtStart - padMin;
+                    double padStop = c.RtStop + padMin;
+                    var (a, b) = RtToBinRange(padStart, padStop);
+                    if (a >= b) continue;
+                    int load = RangeMax(slotsPerBin, a, b);
+                    if (load >= parameters.CycleBudget) continue;
+                    if (load < bestMaxLoad
+                        || (load == bestMaxLoad && q < bestTieRank))
+                    {
+                        bestMaxLoad = load;
+                        bestCandIdx = candIdx;
+                        bestTieRank = q;
+                    }
                 }
+                if (bestCandIdx >= 0)
+                {
+                    int sid = TrySchedule(bestCandIdx);
+                    if (sid >= 0)
+                    {
+                        chosenSid = sid;
+                        chosenCandIdx = bestCandIdx;
+                    }
+                }
+                // Fallback if the RT-aware pick didn't fit (fragment
+                // clash, co-elution, charge): walk the queue in static
+                // order until something works.
+                if (chosenSid < 0)
+                {
+                    for (int q = cursor; q < queue.Count; q++)
+                    {
+                        int candIdx = queue[q];
+                        if (candIdx == bestCandIdx) continue;
+                        int sid = TrySchedule(candIdx);
+                        if (sid >= 0)
+                        {
+                            chosenSid = sid;
+                            chosenCandIdx = candIdx;
+                            break;
+                        }
+                    }
+                }
+                // Cursor stays at 0. Load-up will re-walk and skip
+                // already-scheduled candidates.
             }
-            groupQueueCursor[g] = cursor;
+            else
+            {
+                while (cursor < queue.Count)
+                {
+                    int candIdx = queue[cursor];
+                    int sid = TrySchedule(candIdx);
+                    cursor++;
+                    if (sid >= 0)
+                    {
+                        chosenSid = sid;
+                        chosenCandIdx = candIdx;
+                        break;
+                    }
+                }
+                groupQueueCursor[g] = cursor;
+            }
+
+            if (chosenSid >= 0)
+            {
+                scheduledToSlot[chosenCandIdx] = chosenSid;
+                coveredGroups.Add(g);
+                scheduledPerGroup[g]++;
+            }
         }
 
         // Pass 2+: load-up loop. Optional. Caps at MaxPeptidesPerProtein
@@ -363,8 +454,12 @@ public static class Scheduler
                     while (cursor < queue.Count)
                     {
                         int candIdx = queue[cursor];
-                        int sid = TrySchedule(candIdx);
                         cursor++;
+                        // Skip peptides already taken by cover pass.
+                        // RT-aware cover may have chosen any position in
+                        // the queue without advancing the cursor.
+                        if (scheduledToSlot.ContainsKey(candIdx)) continue;
+                        int sid = TrySchedule(candIdx);
                         if (sid >= 0)
                         {
                             scheduledToSlot[candIdx] = sid;

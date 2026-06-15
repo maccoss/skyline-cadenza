@@ -73,6 +73,15 @@ public sealed record SchedulingParameters
     /// </summary>
     public double NormalizedCollisionEnergy { get; init; } = 28.0;
 
+    /// <summary>
+    /// When true, the cover pass picks each protein's peptide whose RT bin
+    /// is currently least saturated rather than its highest-intensity
+    /// peptide. Spreads first peptides across the gradient and avoids
+    /// hot-RT clumping that would otherwise lock low-priority proteins
+    /// out of coverage.
+    /// </summary>
+    public bool RtAwareCoverSelection { get; init; } = true;
+
     /// <summary>Convenience accessor: <see cref="FiringPadSec"/> in minutes.</summary>
     public double FiringPadMin => FiringPadSec / 60.0;
 }
