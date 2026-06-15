@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build + Release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Verify curated release notes exist
+        shell: bash
+        run: |
+          notes_path="release-notes/RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_path" ]; then
+            echo "ERROR: curated release notes not found at $notes_path"
+            echo "Expected file matching tag ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+          echo "Using curated release notes from $notes_path"
+
+      - name: Verify tool-inf version matches tag
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          info="src/SkylineCadenza.App/tool-inf/info.properties"
+          version=$(grep -E '^[[:space:]]*Version[[:space:]]*=' "$info" | head -n1 | sed -E 's/^[^=]*=[[:space:]]*//')
+          if [ "$version" != "$tag" ]; then
+            echo "ERROR: tag is $tag but $info has Version = $version"
+            echo "Bump Version in $info to match the release tag before tagging."
+            exit 1
+          fi
+          echo "tool-inf Version = $version matches tag $tag"
+
+      - name: Restore
+        run: dotnet restore SkylineCadenza.sln
+
+      - name: Test
+        run: dotnet test SkylineCadenza.sln --configuration Debug --logger "console;verbosity=normal"
+
+      - name: Build (Release)
+        run: dotnet build SkylineCadenza.sln --configuration Release
+
+      - name: Package SkylineCadenza.zip
+        run: dotnet msbuild build/package.proj
+
+      - name: Rename zip with version tag
+        shell: bash
+        run: |
+          mkdir -p release
+          cp publish/SkylineCadenza.zip "release/SkylineCadenza-${GITHUB_REF_NAME}.zip"
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.zip
+          body_path: release-notes/RELEASE_NOTES_${{ github.ref_name }}.md
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}

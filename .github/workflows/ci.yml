@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build + Test (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore SkylineCadenza.sln
+
+      - name: Build (Debug)
+        run: dotnet build SkylineCadenza.sln --no-restore --configuration Debug
+
+      - name: Test
+        run: dotnet test SkylineCadenza.sln --no-build --configuration Debug --logger "console;verbosity=normal"
+
+      - name: Build (Release)
+        run: dotnet build SkylineCadenza.sln --configuration Release
+
+      - name: Package SkylineCadenza.zip
+        run: dotnet msbuild build/package.proj
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: SkylineCadenza-zip
+          path: publish/SkylineCadenza.zip
+          if-no-files-found: error
