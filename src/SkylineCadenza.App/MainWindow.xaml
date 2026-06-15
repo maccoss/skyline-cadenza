@@ -85,6 +85,9 @@
                 <RadioButton Content="PRM (1 precursor / slot)" GroupName="mode"
                              IsChecked="{Binding Mode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:AcquisitionMode.Prm}}"/>
                 <CheckBox Content="Load balancing (fill remaining budget)" IsChecked="{Binding EnableLoadBalancing}" Margin="0,8,0,0"/>
+                <CheckBox Content="Look-ahead load balancing in cover pass"
+                          IsChecked="{Binding RtAwareCoverSelection}" Margin="0,4,0,0"
+                          ToolTip="Both modes respect the RT-budget constraint (webinar algorithm). When on, the cover pass proactively picks each protein's least-saturated peptide instead of waiting for the highest-scoring peptide to fail. Spreads first peptides across the gradient and increases protein-group coverage in heavily-loaded designs."/>
 
                 <!-- MTM constraints -->
                 <TextBlock Text="MTM constraints" FontWeight="Bold" Margin="0,16,0,4"/>

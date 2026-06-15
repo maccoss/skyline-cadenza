@@ -30,6 +30,7 @@ public partial class MainViewModel : ObservableObject
     /// <summary>Header text for the slots metric: "MTM slots" or "PRM slots".</summary>
     public string SlotsLabel => Mode == AcquisitionMode.Prm ? "PRM slots" : "MTM slots";
     [ObservableProperty] private bool _enableLoadBalancing = true;
+    [ObservableProperty] private bool _rtAwareCoverSelection = true;
 
     // MTM constraints
     [ObservableProperty] private double _isolationWindowTh = 3.0;
@@ -760,6 +761,7 @@ public partial class MainViewModel : ObservableObject
         {
             Mode = Mode,
             EnableLoadBalancing = EnableLoadBalancing,
+            RtAwareCoverSelection = RtAwareCoverSelection,
             IsolationWindowTh = IsolationWindowTh,
             FragmentTolDa = FragmentTolDa,
             CycleBudget = CycleBudget,
@@ -782,6 +784,7 @@ public partial class MainViewModel : ObservableObject
     // move freely without queuing stale work.
     partial void OnModeChanged(AcquisitionMode value) => _ = RescheduleAsync();
     partial void OnEnableLoadBalancingChanged(bool value) => _ = RescheduleAsync();
+    partial void OnRtAwareCoverSelectionChanged(bool value) => _ = RescheduleAsync();
     partial void OnIsolationWindowThChanged(double value) => _ = RescheduleAsync();
     partial void OnFragmentTolDaChanged(double value) => _ = RescheduleAsync();
     partial void OnCycleBudgetChanged(int value) => _ = RescheduleAsync();
