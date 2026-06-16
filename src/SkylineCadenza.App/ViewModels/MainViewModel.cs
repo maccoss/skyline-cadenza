@@ -317,7 +317,6 @@ public partial class MainViewModel : ObservableObject
             var writeResult = await Task.Run(() =>
                 BlibAssayWriter.Write(_candidates, ScheduleResult, blibPath!, assayName));
 
-            string libXml = BuildBibliospecLibraryXml(assayName, blibPath);
             string? libraryListType = null;
             string registrationDiag;
             try
@@ -325,34 +324,65 @@ public partial class MainViewModel : ObservableObject
                 (libraryListType, registrationDiag) = await Task.Run(() =>
                     _skylineSession.Execute(c =>
                     {
-                        // Discover Skyline's canonical name for the
-                        // library settings list rather than guessing.
-                        // GetSettingsListTypes() returns the actual
-                        // names accepted by AddSettingsListItem; we
-                        // pick whichever one matches "lib" so this
-                        // tolerates renames across Skyline versions.
+                        // Identify the Spectral Libraries settings list
+                        // specifically - matching on "lib" alone hits
+                        // "Ion Mobility Libraries" and "Optimization
+                        // Libraries" which silently accept arbitrary XML
+                        // via AddSettingsListItem and pollute the
+                        // document with garbage entries.
                         var allTypes = c.GetSettingsListTypes() ?? Array.Empty<string>();
-                        var libMatches = allTypes
-                            .Where(t => t.IndexOf("lib", StringComparison.OrdinalIgnoreCase) >= 0)
-                            .ToArray();
-                        if (libMatches.Length == 0)
+                        string? listType = allTypes.FirstOrDefault(t =>
+                            t.IndexOf("spectral", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                            t.IndexOf("librar", StringComparison.OrdinalIgnoreCase) >= 0);
+                        if (listType is null)
                         {
                             return ((string?)null,
-                                $"GetSettingsListTypes() returned {allTypes.Length} types, "
-                                + $"none containing 'lib'. Skyline reported: "
+                                $"no 'Spectral Libraries'-like settings list in "
+                                + $"GetSettingsListTypes(). Skyline reported: "
                                 + string.Join(", ", allTypes));
                         }
 
-                        // Try each candidate; first one to accept the
-                        // BLIB XML wins. Capture per-attempt failures
-                        // so a diagnostic comes out either way.
+                        // Build a list of XML candidates. The first is
+                        // adapted from an existing library on the
+                        // document if one is there (guaranteed to be the
+                        // shape Skyline accepts because we just read it
+                        // out); the rest are progressive fallbacks for
+                        // a fresh document with no libraries yet.
+                        var xmlCandidates = new List<(string Source, string Xml)>();
+                        try
+                        {
+                            var existingNames = c.GetSettingsListNames(listType, null);
+                            if (existingNames is { Length: > 0 })
+                            {
+                                string existingXml = c.GetSettingsListItem(listType, existingNames[0]);
+                                if (!string.IsNullOrWhiteSpace(existingXml))
+                                {
+                                    xmlCandidates.Add((
+                                        $"adapted from '{existingNames[0]}'",
+                                        AdaptLibrarySpecXml(existingXml, assayName, blibPath)));
+                                }
+                            }
+                        }
+                        catch { /* no existing libs - fall through to defaults */ }
+                        xmlCandidates.AddRange(BuildBibliospecLibraryXmlCandidates(assayName, blibPath));
+
                         var attemptErrors = new List<string>();
-                        foreach (var listType in libMatches)
+                        foreach (var (source, candidateXml) in xmlCandidates)
                         {
                             try
                             {
-                                c.AddSettingsListItem(listType, libXml, overwrite: true);
-                                // Activate in document.
+                                c.AddSettingsListItem(listType, candidateXml, overwrite: true);
+                            }
+                            catch (Exception addEx)
+                            {
+                                attemptErrors.Add($"{source}: AddSettingsListItem -> {addEx.Message}");
+                                continue;
+                            }
+                            // Add succeeded; try to select. If select
+                            // fails, leave the entry registered and
+                            // report so the user can activate manually.
+                            try
+                            {
                                 var active = c.GetSettingsListSelectedItems(listType)
                                     ?? Array.Empty<string>();
                                 if (!active.Contains(assayName))
@@ -361,16 +391,19 @@ public partial class MainViewModel : ObservableObject
                                     c.SelectSettingsListItems(listType, updated);
                                 }
                                 return ((string?)listType,
-                                    $"registered + selected via list type '{listType}'");
+                                    $"registered + selected via '{listType}' ({source})");
                             }
-                            catch (Exception inner)
+                            catch (Exception selectEx)
                             {
-                                attemptErrors.Add($"'{listType}': {inner.Message}");
+                                return ((string?)listType,
+                                    $"registered via '{listType}' ({source}), "
+                                    + $"but SelectSettingsListItems failed: {selectEx.Message}. "
+                                    + $"Activate manually via Settings > Peptide Settings > Library.");
                             }
                         }
                         return ((string?)null,
-                            $"AddSettingsListItem rejected all candidates "
-                            + $"({string.Join("; ", libMatches)}): "
+                            $"AddSettingsListItem against '{listType}' rejected every XML "
+                            + $"candidate ({xmlCandidates.Count} tried): "
                             + string.Join(" | ", attemptErrors));
                     }));
             }
@@ -518,16 +551,79 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Skyline library XML for a BiblioSpec-Lite library. Skyline reads
-    /// the library file from <c>file_name_hint</c> at attach time.
+    /// Ordered list of BiblioSpec-Lite library XML shapes to try
+    /// against <c>AddSettingsListItem</c> when the document has no
+    /// existing library to adapt from. Each candidate is paired with a
+    /// short tag so a successful registration can report which shape
+    /// Skyline accepted (we lock that in next round if it ends up
+    /// being version-stable). Skyline reads the BLIB file from
+    /// <c>file_name_hint</c> at attach time.
     /// </summary>
-    private static string BuildBibliospecLibraryXml(string name, string filePath)
+    private static IEnumerable<(string Source, string Xml)> BuildBibliospecLibraryXmlCandidates(
+        string name, string filePath)
     {
-        // Escape XML attributes - paths can contain & or ' on some
-        // platforms. SecurityElement.Escape covers the common cases.
         string escName = System.Security.SecurityElement.Escape(name);
         string escPath = System.Security.SecurityElement.Escape(filePath);
-        return $"<bibliospec_lite_library name=\"{escName}\" file_name_hint=\"{escPath}\" />";
+        string lsid = System.Security.SecurityElement.Escape(
+            $"urn:lsid:cadenza:spectral_library:bibliospec:nr:{name}");
+
+        // Most-complete shape first: name + file_name_hint + revision
+        // + lsid. Matches what Skyline writes back when an existing
+        // BiblioSpec library is serialised into a saved .sky document.
+        yield return ("bibliospec_lite_library/full",
+            $"<bibliospec_lite_library name=\"{escName}\" "
+            + $"file_name_hint=\"{escPath}\" revision=\"0\" lsid=\"{lsid}\" />");
+
+        yield return ("bibliospec_lite_library/no-lsid",
+            $"<bibliospec_lite_library name=\"{escName}\" "
+            + $"file_name_hint=\"{escPath}\" revision=\"0\" />");
+
+        yield return ("bibliospec_lite_library/minimal",
+            $"<bibliospec_lite_library name=\"{escName}\" file_name_hint=\"{escPath}\" />");
+
+        // Alternative root element name: some Skyline versions might
+        // register the spec class under bibliospec_lite_spec instead.
+        yield return ("bibliospec_lite_spec/minimal",
+            $"<bibliospec_lite_spec name=\"{escName}\" file_name_hint=\"{escPath}\" />");
+    }
+
+    /// <summary>
+    /// Take an existing library XML (the shape Skyline just gave us
+    /// back from <c>GetSettingsListItem</c>) and replace the
+    /// <c>name</c> and <c>file_name_hint</c> attributes so the result
+    /// points at our new BLIB. Everything else - root element, lsid
+    /// schema, revision, etc. - stays as Skyline wrote it.
+    /// </summary>
+    private static string AdaptLibrarySpecXml(string templateXml, string newName, string newPath)
+    {
+        try
+        {
+            var doc = System.Xml.Linq.XDocument.Parse(templateXml);
+            var root = doc.Root;
+            if (root is null) return templateXml;
+            root.SetAttributeValue("name", newName);
+            // Some library types use file_path or db_path instead of
+            // file_name_hint. Update whichever already exists; add
+            // file_name_hint as a default if none of the known names
+            // are present.
+            string[] pathAttrs = { "file_name_hint", "file_path", "db_path" };
+            bool updatedPath = false;
+            foreach (var attrName in pathAttrs)
+            {
+                if (root.Attribute(attrName) is not null)
+                {
+                    root.SetAttributeValue(attrName, newPath);
+                    updatedPath = true;
+                    break;
+                }
+            }
+            if (!updatedPath) root.SetAttributeValue("file_name_hint", newPath);
+            return root.ToString();
+        }
+        catch (System.Xml.XmlException)
+        {
+            return templateXml;
+        }
     }
 
     [RelayCommand]
