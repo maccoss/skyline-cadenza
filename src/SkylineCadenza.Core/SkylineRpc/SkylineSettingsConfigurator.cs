@@ -39,6 +39,7 @@ public static class SkylineSettingsConfigurator
         int LibraryPickTopN,
         int PeptideMinLength,
         int PeptideMaxLength,
+        int PeptideExcludeNTerminalAAs,
         string FullScanAcquisitionMethod,
         string? FullScanIsolationScheme,
         string RetentionTimeFilter,
@@ -63,7 +64,8 @@ public static class SkylineSettingsConfigurator
             + $"product charges {{{string.Join(",", ProductIonCharges)}}}, "
             + $"ion types {{{string.Join(",", ProductIonTypes)}}}, "
             + $"library pick top {LibraryPickTopN}, "
-            + $"peptide length {PeptideMinLength}-{PeptideMaxLength}.";
+            + $"peptide length {PeptideMinLength}-{PeptideMaxLength}, "
+            + $"exclude {PeptideExcludeNTerminalAAs} N-terminal AAs.";
 
         /// <summary>
         /// Step-by-step instructions the user can follow in the Skyline UI
@@ -87,6 +89,7 @@ public static class SkylineSettingsConfigurator
             sb.AppendLine("  Peptide Settings > Filter:");
             sb.AppendLine($"    Min length: {PeptideMinLength}");
             sb.AppendLine($"    Max length: {PeptideMaxLength}");
+            sb.AppendLine($"    Exclude N-terminal AAs: {PeptideExcludeNTerminalAAs}");
             return sb.ToString().TrimEnd();
         }
     }
@@ -192,7 +195,13 @@ public static class SkylineSettingsConfigurator
             PrecursorIsotopes: "Count",
             PrecursorIsotopeCount: 3,
             PrecursorAnalyzer: "centroided",
-            PrecursorMassAccuracyPpm: 10);
+            PrecursorMassAccuracyPpm: 10,
+            // 0 = include every position. Skyline's default of 25
+            // (intended to skip signal-peptide N-terminal fragments)
+            // would drop peptides Cadenza explicitly designed the
+            // assay around, since we picked them from observation
+            // not from a sequence-position filter.
+            PeptideExcludeNTerminalAAs: 0);
     }
 
     /// <summary>
@@ -240,6 +249,7 @@ public static class SkylineSettingsConfigurator
         {
             new[] { "--pep-min-length=" + rec.PeptideMinLength },
             new[] { "--pep-max-length=" + rec.PeptideMaxLength },
+            new[] { "--pep-exclude-nterminal-aas=" + rec.PeptideExcludeNTerminalAAs },
             new[] { "--tran-precursor-ion-charges=" + string.Join(",", rec.PrecursorIonCharges) },
             new[] { "--tran-product-ion-charges=" + string.Join(",", rec.ProductIonCharges) },
             new[] { "--tran-product-ion-types=" + string.Join(",", rec.ProductIonTypes) },
