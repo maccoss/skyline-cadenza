@@ -358,8 +358,16 @@ public partial class MainViewModel : ObservableObject
                 string addLibOutput = await Task.Run(() =>
                     _skylineSession.Execute(c => c.RunCommand(new[]
                     {
-                        "--add-library-name=" + assayName,
+                        // --add-library-path before --add-library-name:
+                        // SkylineCmd is supposed to parse all args
+                        // before running handlers (so the order
+                        // shouldn't matter), but in practice RunCommand
+                        // was leaving the library unattached when name
+                        // came first. Trying path-first to see if the
+                        // argument-stash order matters somewhere
+                        // upstream.
                         "--add-library-path=" + blibPath!,
+                        "--add-library-name=" + assayName,
                     })));
                 if (string.IsNullOrWhiteSpace(addLibOutput))
                 {
