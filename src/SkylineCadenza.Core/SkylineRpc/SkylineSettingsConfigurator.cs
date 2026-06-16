@@ -226,21 +226,25 @@ public static class SkylineSettingsConfigurator
             new[] { "--tran-product-end-ion=last ion" },
             new[] { "--library-pick-product-ions=filter" },
             new[] { "--library-product-ions=" + rec.LibraryPickTopN },
-            new[] { "--full-scan-acquisition-method=" + rec.FullScanAcquisitionMethod },
-            // RT filter: tell Skyline to extract chromatograms within
-            // the assay's worst-case half-width of each peptide's
-            // BLIB-derived predicted apex.
-            new[] { "--full-scan-rt-filter=" + rec.RetentionTimeFilter },
-            new[] { "--full-scan-rt-filter-tolerance=" + rec.RetentionTimeFilterToleranceMin.ToString(
-                "0.0", System.Globalization.CultureInfo.InvariantCulture) },
         };
-        // Isolation scheme only applies to DIA mode (MTM); PRM uses the
-        // quadrupole isolation set per acquisition and doesn't need a
-        // scheme.
+        // Isolation scheme MUST come before --full-scan-acquisition-method
+        // = DIA: Skyline validates that an isolation scheme with a
+        // width is already in place when the acquisition method
+        // switches to DIA, and rejects the change otherwise with
+        // "An isolation window width value is required in DIA mode."
+        // PRM doesn't need a scheme so we skip it entirely there.
         if (rec.FullScanIsolationScheme is not null)
         {
             batchList.Add(new[] { "--full-scan-isolation-scheme=" + rec.FullScanIsolationScheme });
         }
+        batchList.Add(new[] { "--full-scan-acquisition-method=" + rec.FullScanAcquisitionMethod });
+        // RT filter: tell Skyline to extract chromatograms within
+        // the assay's worst-case half-width of each peptide's
+        // BLIB-derived predicted apex.
+        batchList.Add(new[] { "--full-scan-rt-filter=" + rec.RetentionTimeFilter });
+        batchList.Add(new[] { "--full-scan-rt-filter-tolerance="
+            + rec.RetentionTimeFilterToleranceMin.ToString(
+                "0.0", System.Globalization.CultureInfo.InvariantCulture) });
         string[][] argBatches = batchList.ToArray();
 
         var collected = new List<string>(argBatches.Length);
