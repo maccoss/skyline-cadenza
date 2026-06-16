@@ -7,28 +7,24 @@ using SkylineCadenza.Core.Scheduling;
 namespace SkylineCadenza.Core.SkylineRpc;
 
 /// <summary>
-/// Computes the peptide and transition-filter settings that Cadenza's
-/// assay needs Skyline to be configured with, so the imported
-/// transition list lands as a complete target tree.
+/// Aligns the running Skyline document's peptide / transition-filter
+/// settings with the shape of the assay Cadenza is about to push.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Today the JSON-RPC interface does not expose a way to modify the
-/// LIVE document's peptide / transition filter settings - the relevant
-/// <c>SkylineCmd</c> flags (<c>--tran-precursor-ion-charges</c>, etc.)
-/// operate on a saved document via <c>--in</c> / <c>--out</c>, not on
-/// the in-memory document held by the running Skyline UI that we're
-/// connected to via the pipe. As a result this class does NOT mutate
-/// any settings: it only computes the recommended values from the
-/// assay and returns them as user-facing text, so the user can verify
-/// or apply them through Skyline's UI before the push.
+/// All updates go through <see cref="IJsonToolService.RunCommand"/>.
+/// Per Nick Shulman: anything <c>SkylineCmd</c> can do is also
+/// reachable via JSON-RPC <c>RunCommand</c> against the live document,
+/// so we use the same flags here that the command-line build accepts.
+/// Some flags may not be recognised by every Skyline version - those
+/// surface as text in the returned report rather than aborting the
+/// rest of the configuration.
 /// </para>
 /// <para>
-/// Upstream gap: a JSON-RPC method like <c>SetTransitionFilter(charges,
-/// ionTypes, ionRange)</c> would close this. Until that lands, the
-/// most reliable workflow is for the user to set transition settings
-/// once per Skyline session via the UI (Settings &gt; Transition
-/// Settings &gt; Filter) and then run pushes against that baseline.
+/// The recommendation is intentionally union-of-assay for charge sets
+/// and the broadest sensible ion-type / ion-range filter, so the
+/// user's downstream Skyline analysis isn't surprised by a narrower
+/// filter than what their library actually contains.
 /// </para>
 /// </remarks>
 public static class SkylineSettingsConfigurator
@@ -56,7 +52,8 @@ public static class SkylineSettingsConfigurator
 
         /// <summary>
         /// Step-by-step instructions the user can follow in the Skyline UI
-        /// to align the document with the recommendation.
+        /// to align the document with the recommendation (used as a
+        /// fallback when one of the <c>SkylineCmd</c> flags fails).
         /// </summary>
         public string ToUiInstructions()
         {
@@ -112,5 +109,75 @@ public static class SkylineSettingsConfigurator
             LibraryPickTopN: BlibAssayWriter.PeaksPerSpectrum,
             PeptideMinLength: minLen,
             PeptideMaxLength: maxLen);
+    }
+
+    /// <summary>
+    /// Result of running the configurator: the recommendation that was
+    /// computed, plus any <c>SkylineCmd</c> output that came back from
+    /// the live document (empty / whitespace means Skyline accepted the
+    /// settings silently).
+    /// </summary>
+    public sealed record ConfigureResult(Recommendation Recommendation, string SkylineOutput);
+
+    /// <summary>
+    /// Compute the recommendation and apply it to the live document via
+    /// <c>RunCommand</c>. Per Nick Shulman, <c>RunCommand</c> against
+    /// the JSON-RPC pipe operates on the document held by the running
+    /// Skyline UI, so the same flags <c>SkylineCmd</c> would accept on
+    /// a saved file also work here.
+    /// </summary>
+    public static async Task<ConfigureResult> ConfigureAsync(
+        SkylineSession session,
+        IReadOnlyList<Candidate> scheduledCandidates,
+        CancellationToken cancellationToken = default)
+    {
+        var rec = Recommend(scheduledCandidates);
+
+        // One RunCommand per concern. Unknown flags get echoed back in
+        // the output text rather than throwing, so we capture each
+        // batch's response and concatenate.
+        string[][] argBatches =
+        {
+            new[]
+            {
+                "--peptide-min-length=" + rec.PeptideMinLength,
+                "--peptide-max-length=" + rec.PeptideMaxLength,
+            },
+            new[]
+            {
+                "--tran-precursor-ion-charges=" + string.Join(",", rec.PrecursorIonCharges),
+                "--tran-product-ion-charges=" + string.Join(",", rec.ProductIonCharges),
+                "--tran-product-ion-types=" + string.Join(",", rec.ProductIonTypes),
+            },
+            new[]
+            {
+                "--tran-product-start-ion=ion 1",
+                "--tran-product-end-ion=last ion",
+            },
+            new[]
+            {
+                "--library-pick-product-ions=filter",
+                "--tran-library-pick-N=" + rec.LibraryPickTopN,
+            },
+        };
+
+        var collected = new List<string>(argBatches.Length);
+        foreach (var args in argBatches)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                string output = await Task.Run(
+                    () => session.Execute(c => c.RunCommand(args)),
+                    cancellationToken);
+                if (!string.IsNullOrWhiteSpace(output))
+                    collected.Add(output.Trim());
+            }
+            catch (Exception ex)
+            {
+                collected.Add($"({string.Join(" ", args)}): {ex.Message}");
+            }
+        }
+        return new ConfigureResult(rec, string.Join(" | ", collected));
     }
 }

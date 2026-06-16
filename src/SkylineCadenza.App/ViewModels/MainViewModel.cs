@@ -324,7 +324,19 @@ public partial class MainViewModel : ObservableObject
             {
                 await Task.Run(() => _skylineSession.Execute(c =>
                 {
+                    // Register in the Libraries settings list...
                     c.AddSettingsListItem("Libraries", libXml, overwrite: true);
+                    // ...then make sure the new library is part of the
+                    // selected-in-document set so Skyline actually
+                    // uses it (settings-list membership alone does not
+                    // activate). Preserves any libraries already
+                    // selected.
+                    var active = c.GetSettingsListSelectedItems("Libraries") ?? Array.Empty<string>();
+                    if (!active.Contains(assayName))
+                    {
+                        var updated = active.Append(assayName).ToArray();
+                        c.SelectSettingsListItems("Libraries", updated);
+                    }
                     return 0;
                 }));
             }
@@ -338,22 +350,27 @@ public partial class MainViewModel : ObservableObject
                 return;
             }
 
-            // Step 1.5: compute the recommended peptide + transition
-            // filter settings for this assay and surface them so the
-            // user can verify Skyline is configured to receive every
-            // fragment the transition list is about to push. The JSON-
-            // RPC interface does not currently let us mutate the LIVE
-            // document's transition filter (SkylineCmd's --tran-*
-            // flags operate on saved files, not the in-memory doc),
-            // so this is advisory only - upstream Skyline change
-            // tracked as a known gap.
+            // Step 1.5: align the document's peptide + transition
+            // filter with the assay. Per Nick Shulman, RunCommand via
+            // JSON-RPC behaves as if the user typed the SkylineCmd
+            // flags into Skyline's Immediate Window, so the same
+            // --tran-* / --peptide-* flags apply to the live document.
+            // The most common cause of an empty target tree is a
+            // default product-ion-charges = {1} filter, which silently
+            // rejects every +2 fragment DIA-NN picked.
             var scheduledCands = ScheduleResult.ScheduledIndices
                 .Select(i => _candidates[i])
                 .ToList();
-            var recommendation = SkylineSettingsConfigurator.Recommend(scheduledCands);
             StatusMessage = $"BLIB registered: {writeResult.RefSpectraWritten:n0} peptides. "
-                + "Verify Skyline transition filter: " + recommendation.ToStatusLine()
-                + " Pushing transition list...";
+                + "Aligning document peptide + transition filter...";
+            var settingsResult = await SkylineSettingsConfigurator.ConfigureAsync(
+                _skylineSession!, scheduledCands);
+            var recommendation = settingsResult.Recommendation;
+            string settingsTail = string.IsNullOrWhiteSpace(settingsResult.SkylineOutput)
+                ? "OK"
+                : settingsResult.SkylineOutput;
+            StatusMessage = $"Filter applied ({recommendation.ToStatusLine()}; Skyline: {settingsTail}). "
+                + "Pushing transition list...";
 
             // Step 2: transition-list import. Each row carries the real
             // FragmentIon.Charge so Skyline's product-ion match succeeds
@@ -399,9 +416,8 @@ public partial class MainViewModel : ObservableObject
             StatusMessage = $"Pushed '{assayName}': "
                 + $"BLIB at {Path.GetFileName(blibPath)} ({writeResult.RefSpectraWritten:n0} peptides) + "
                 + $"transition list ({rowCount:n0} rows in {elapsed.TotalMinutes:0.0} min). "
-                + $"Skyline: {head}. "
-                + "If transitions are missing, verify Settings > Transition Settings > Filter "
-                + $"matches: {recommendation.ToStatusLine()}";
+                + $"Filter set to {recommendation.ToStatusLine()}. "
+                + $"Skyline: {head}";
         }
         catch (Exception ex)
         {
