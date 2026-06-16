@@ -97,12 +97,17 @@ public static class SkylineSettingsConfigurator
     /// from Skyline's perspective (each MS/MS spectrum carries multiple
     /// co-isolated precursors), and we don't pre-specify isolation
     /// windows because Cadenza schedules them per slot - Skyline reads
-    /// them from the imported result files.</item>
+    /// the actual isolation scheme from the raw file at import time.</item>
     /// </list>
-    /// The RT filter is <c>scheduling_windows</c> (uses the BLIB's
-    /// library RT as the prediction); the tolerance is the assay's
-    /// worst-case half-width from apex to peak edge, padded by
-    /// <paramref name="firingPadMin"/>, rounded up to 0.1 min.
+    /// The RT filter is <c>ms2_ids</c> ("Use only scans within X
+    /// minutes of MS/MS IDs"), which uses MS/MS identifications -
+    /// including library spectra from the BLIB we just registered -
+    /// to bound chromatogram extraction. This works out-of-the-box
+    /// with the BLIB; the alternative <c>scheduling_windows</c> would
+    /// also require setting up an RT predictor under Peptide Settings &gt;
+    /// Prediction. The tolerance is the assay's worst-case half-width
+    /// from apex to peak edge, padded by <paramref name="firingPadMin"/>,
+    /// rounded up to 0.1 min.
     /// </summary>
     public static Recommendation Recommend(
         IReadOnlyList<Candidate> scheduledCandidates,
@@ -160,7 +165,7 @@ public static class SkylineSettingsConfigurator
             PeptideMaxLength: maxLen,
             FullScanAcquisitionMethod: acquisitionMethod,
             FullScanIsolationScheme: isolationScheme,
-            RetentionTimeFilter: "scheduling_windows",
+            RetentionTimeFilter: "ms2_ids",
             RetentionTimeFilterToleranceMin: rtFilterToleranceMin);
     }
 
