@@ -12,11 +12,12 @@ Lineage: ported from the prototype notebook at [`maccoss/targeted-modeling`](htt
 
 ## Architecture
 
-Three projects under `src/`:
+Four projects under `src/`:
 
-- **`SkylineCadenza.Core`** (`net8.0-windows`) — pure algorithms + I/O + RPC client. No WPF references. Contains parsimony, the scheduler, DIA-NN / Carafe ingest, Skyline-document ingest, the Thermo CSV writer, and link-compiled copies of pwiz's `SkylineTool` client sources. Should remain UI-free so it can be tested headlessly.
+- **`SkylineCadenza.Core`** (`net8.0-windows`) — pure algorithms + I/O + RPC client. No WPF references. Contains parsimony, the scheduler, DIA-NN / Carafe ingest, Skyline-document ingest, the Thermo CSV writer, BLIB writer, and link-compiled copies of pwiz's `SkylineTool` client sources. Should remain UI-free so it can be tested headlessly.
 - **`SkylineCadenza.App`** (`net8.0-windows`, WPF) — the `.exe` Skyline launches. Contains `MainViewModel`, the XAML, per-plot rendering code, and the `tool-inf` manifest pair.
-- **`SkylineCadenza.Tests`** (xUnit, `net8.0-windows`) — 21 tests today, including golden-file regressions against the notebook prototype. New algorithm changes should include or update a golden fixture.
+- **`SkylineCadenza.Cli`** (`net8.0-windows`, console exe) — headless companion that exposes the Core scheduler via a simple JSON-in / JSON-out interface. Used by the algorithm-comparison Jupyter notebook so plots reflect the real C# scheduler bit-for-bit. Invoke as `dotnet run --project src/SkylineCadenza.Cli -- schedule INPUT.json OUTPUT.json`; pass `-` for stdin / stdout.
+- **`SkylineCadenza.Tests`** (xUnit, `net8.0-windows`) — 49 tests today: parsimony, scheduler, fragment-clash, slot-edge rule, coverage objectives, BLIB reader, BLIB writer round-trip, settings configurator, transition-list builder. New algorithm changes should include or update a test fixture.
 
 Vendored pwiz sources live in `external/SkylineTool/` and are link-compiled into `Core` via `<Compile Include="..\..\external\SkylineTool\..." Link="..."/>` — same pattern `SkylineMcpServer.csproj` uses upstream. Do not modify these files; if pwiz upstream changes, re-vendor wholesale.
 

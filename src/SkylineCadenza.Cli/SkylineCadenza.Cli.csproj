@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Headless companion to the WPF app. Must match Core's target
+         framework because Core link-compiles the pwiz SkylineTool
+         sources which need net8.0-windows. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SkylineCadenza.Cli</RootNamespace>
+    <AssemblyName>SkylineCadenzaCli</AssemblyName>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SkylineCadenza.Core\SkylineCadenza.Core.csproj" />
+  </ItemGroup>
+
+</Project>
