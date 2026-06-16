@@ -99,15 +99,20 @@ public static class SkylineSettingsConfigurator
     /// windows because Cadenza schedules them per slot - Skyline reads
     /// the actual isolation scheme from the raw file at import time.</item>
     /// </list>
-    /// The RT filter is <c>ms2_ids</c> ("Use only scans within X
-    /// minutes of MS/MS IDs"), which uses MS/MS identifications -
-    /// including library spectra from the BLIB we just registered -
-    /// to bound chromatogram extraction. This works out-of-the-box
-    /// with the BLIB; the alternative <c>scheduling_windows</c> would
-    /// also require setting up an RT predictor under Peptide Settings &gt;
-    /// Prediction. The tolerance is the assay's worst-case half-width
-    /// from apex to peak edge, padded by <paramref name="firingPadMin"/>,
-    /// rounded up to 0.1 min.
+    /// The RT filter is <c>scheduling_windows</c> ("Use only scans
+    /// within X minutes of predicted RT"). The "predicted RT" comes
+    /// from the document's <c>PeptideSettings.Prediction</c>, which
+    /// the user must configure manually one time (no SkylineCmd flag
+    /// exposes the predictor or the "Use measured retention times
+    /// when present" toggle): set the alignment target to library RTs
+    /// so the predicted apex falls back to the BLIB's library RT for
+    /// each peptide. We use this in preference to <c>ms2_ids</c>
+    /// because freshly-acquired PRM / MTM raw files don't carry any
+    /// MS/MS IDs - the assay was DESIGNED by Cadenza, not searched -
+    /// so <c>ms2_ids</c> would have nothing to filter against once
+    /// the data are imported. The tolerance is the assay's worst-case
+    /// half-width from apex to peak edge, padded by
+    /// <paramref name="firingPadMin"/>, rounded up to 0.1 min.
     /// </summary>
     public static Recommendation Recommend(
         IReadOnlyList<Candidate> scheduledCandidates,
@@ -165,7 +170,7 @@ public static class SkylineSettingsConfigurator
             PeptideMaxLength: maxLen,
             FullScanAcquisitionMethod: acquisitionMethod,
             FullScanIsolationScheme: isolationScheme,
-            RetentionTimeFilter: "ms2_ids",
+            RetentionTimeFilter: "scheduling_windows",
             RetentionTimeFilterToleranceMin: rtFilterToleranceMin);
     }
 
