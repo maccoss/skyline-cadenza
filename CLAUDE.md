@@ -73,14 +73,15 @@ If a release fails because of the verification check, the fix is to bump the ver
 
 The published webinar algorithm is the reactive cover pass: walk a protein's score-sorted peptide queue, take the first one that fits the RT-budget constraint. When the best-score peptide would push the concurrent count over budget at its RT, fall back to the next in the queue (webinar slide 9: "Balanced Load selects Peptide2 instead").
 
-Cadenza ships two equivalent implementations:
+The three `CoverageObjective` values bundle the cover-pass strategy and the load-up cap together so the UI is a single radio group:
 
-- **Reactive** (`RtAwareCoverSelection = false`): exactly the published flow. `TrySchedule` returns failure when the RT bin is at budget; the cover loop tries the next peptide.
-- **Look-ahead** (default, `RtAwareCoverSelection = true`): evaluates each peptide's current `slotsPerBin` saturation before calling `TrySchedule` and picks the lowest-load candidate. Score is the tiebreak. Spreads first peptides across the gradient to reduce hot-bin clumping.
+- **`Balanced`** — Reactive cover (the published webinar): walk the static intensity-sorted queue, take the first peptide that fits; on a per-bin budget hit, fall back to the next peptide in score order. Load-up cap = `MaxPeptidesPerProtein`. Round-robin across covered groups.
+- **`MaximizeProteins`** (default) — Look-ahead cover with prefer-joinable: for each protein, first walk the queue and accept any peptide that joins an existing slot for free; if none joinable, fall through to the least-saturated-RT-bin pick. Load-up cap = `MinPeptidesPerProtein` (default 1 → load-up effectively disabled), so saved budget feeds first-peptide coverage of more proteins.
+- **`MaximizePeptides`** — Look-ahead cover (no joinable-first preference). Load-up cap = `int.MaxValue`. Round-robin order preserved: a protein never gets its k+1th peptide before every other protein has had a chance at its kth.
 
-Both modes respect the same RT-budget constraint; the difference is whether the alternate-peptide pick is proactive or reactive. On heavy MTM multiplexing the look-ahead default may under-cover (it steers away from RT bins where existing slots are joinable for free) — the default is provisional pending A/B validation on more datasets. Do not describe look-ahead as "more RT-aware" than reactive; both are RT-aware.
+`SchedulingParameters` no longer carries `EnableLoadBalancing` or `RtAwareCoverSelection` toggles; the objective alone determines those behaviors. If you need exact published-webinar behavior, pick `Balanced`. If you want to A/B against the previous default ("look-ahead + round-robin to Max"), that combination isn't available as a single objective — `MaximizeProteins` is the look-ahead path and `Balanced` is the reactive path with round-robin load-up.
 
-`MaxPeptidesPerProtein` and `MinPeptidesPerProtein` only affect the load-up pass and the post-filter; cover-pass behavior is identical regardless of these knobs. If a user reports "changing max doesn't change coverage," that is expected behavior of the published algorithm, not a bug.
+`MaxPeptidesPerProtein` and `MinPeptidesPerProtein` interact with the objective via the load-up cap above; cover-pass behavior is identical regardless of these knobs. If a user reports "changing max doesn't change coverage," that is expected when the objective's cap is `Min` or `int.MaxValue`, not `Max`.
 
 ## Code Style
 

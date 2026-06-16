@@ -359,10 +359,15 @@ public class SchedulerTests
     }
 
     [Fact]
-    public void Load_up_adds_extra_peptides_to_already_covered_groups()
+    public void Load_up_adds_extra_peptides_under_Balanced_but_not_under_MaximizeProteins_with_default_Min()
     {
-        // One protein, three candidates that don't overlap in RT. Pass 1
-        // schedules the first. Load-up should add the others.
+        // One protein, three candidates that don't overlap in RT. Cover
+        // pass schedules the highest-score one; the load-up cap is what
+        // decides whether the others get added.
+        //
+        // Balanced load-up cap = Max (default 5) -> all three schedule.
+        // MaximizeProteins load-up cap = Min (default 1) -> only the
+        // cover-pass pick survives.
         var cands = new[]
         {
             Make("A", 500.0, 5.0, 5.4, "G1", quantity: 1e8),
@@ -370,10 +375,18 @@ public class SchedulerTests
             Make("C", 700.0, 7.0, 7.4, "G1", quantity: 1e6),
         };
 
-        var withLoad = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 100, EnableLoadBalancing = true });
-        var noLoad  = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 100, EnableLoadBalancing = false });
+        var balanced = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            Objective = CoverageObjective.Balanced,
+        });
+        var maxProteins = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            Objective = CoverageObjective.MaximizeProteins,
+        });
 
-        Assert.Equal(3, withLoad.ScheduledIndices.Length);
-        Assert.Single(noLoad.ScheduledIndices);
+        Assert.Equal(3, balanced.ScheduledIndices.Length);
+        Assert.Single(maxProteins.ScheduledIndices);
     }
 }

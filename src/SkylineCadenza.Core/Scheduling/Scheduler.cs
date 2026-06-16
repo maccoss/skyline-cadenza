@@ -411,33 +411,32 @@ public static class Scheduler
             _ => rawMax,
         };
 
-        // Pass 1: cover one peptide per group.
+        // Pass 1: cover one peptide per group. Cover-pass strategy is
+        // selected by Objective:
         //
-        // Both strategies implement the published webinar's RT-budget
-        // rule (no more than CycleBudget concurrent precursors at any RT
-        // bin) and both produce the slide-9 outcome of "pick a
-        // lower-score peptide when the best-score peptide can't fit."
-        // The difference is when the budget check happens:
+        // - Balanced (published webinar): reactive cover. Walk the
+        //   static intensity-sorted queue and TrySchedule; on a per-bin
+        //   budget hit, fall back to the next peptide in score order.
+        //   Slide 9 exactly.
         //
-        // - Reactive (RtAwareCoverSelection = false): walk the static
-        //   intensity-sorted queue; TrySchedule fails when the best
-        //   peptide's RT bin is at budget; fall back to the next
-        //   peptide in score order. Slide 9 exactly.
+        // - MaximizeProteins: look-ahead cover with prefer-joinable.
+        //   First walk the queue in score order and accept any peptide
+        //   that joins an existing slot for free; if none joinable,
+        //   fall through to the look-ahead pick (least-saturated RT
+        //   bin) and finally to a static-order fallback. Conserves
+        //   budget for first-peptide coverage of more proteins.
         //
-        // - Look-ahead (default): for each protein, evaluate every
-        //   peptide in its queue against the current slotsPerBin
-        //   saturation and pick the one with the most headroom before
-        //   calling TrySchedule. Spreads first peptides across the
-        //   gradient so the score-bin clumping that would have to
-        //   trigger fallbacks in later proteins is avoided up front.
-        //   When two RT regions are equally crowded, falls back to
-        //   static intensity / q-value order.
+        // - MaximizePeptides: look-ahead cover only (no joinable-first
+        //   preference); same load-up shape as MaximizeProteins's
+        //   look-ahead path, but with no cap on load-up.
         //
-        // Look-ahead cover deliberately doesn't advance the cursor
-        // past unchosen peptides - they weren't tried, just considered
-        // and skipped. Load-up walks from cursor=0 and skips
-        // already-scheduled candidates so unchosen peptides remain
-        // available for the load-up phase.
+        // The Objective also decides the cursor advancement: reactive
+        // cover advances the cursor past peptides it tried so they
+        // don't get retried in the load-up; look-ahead cover holds the
+        // cursor at 0 because it considered-but-didn't-try most of the
+        // queue (load-up walks from 0 and skips already-scheduled
+        // candidates to recover them).
+        bool useLookAhead = parameters.Objective != CoverageObjective.Balanced;
         foreach (var g in groupOrder)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -469,7 +468,7 @@ public static class Scheduler
                 }
             }
 
-            if (chosenSid < 0 && parameters.RtAwareCoverSelection)
+            if (chosenSid < 0 && useLookAhead)
             {
                 int bestCandIdx = -1;
                 int bestMaxLoad = int.MaxValue;
@@ -547,10 +546,13 @@ public static class Scheduler
             }
         }
 
-        // Pass 2+: load-up loop. Optional. Caps at MaxPeptidesPerProtein
-        // peptides per group so single intense proteins don't monopolise
-        // the budget while smaller ones miss out.
-        if (parameters.EnableLoadBalancing)
+        // Pass 2+: load-up loop. Always runs; the per-Objective
+        // effectiveMaxPerGroup cap above decides how much it adds:
+        //   Balanced         -> cap = MaxPeptidesPerProtein.
+        //   MaximizeProteins -> cap = MinPeptidesPerProtein (default
+        //                       Min = 1 means load-up is effectively
+        //                       a no-op).
+        //   MaximizePeptides -> cap = int.MaxValue.
         {
             while (true)
             {

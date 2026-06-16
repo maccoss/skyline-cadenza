@@ -30,9 +30,7 @@ public partial class MainViewModel : ObservableObject
 
     /// <summary>Header text for the slots metric: "MTM slots" or "PRM slots".</summary>
     public string SlotsLabel => Mode == AcquisitionMode.Prm ? "PRM slots" : "MTM slots";
-    [ObservableProperty] private bool _enableLoadBalancing = true;
-    [ObservableProperty] private bool _rtAwareCoverSelection = true;
-    [ObservableProperty] private CoverageObjective _objective = CoverageObjective.Balanced;
+    [ObservableProperty] private CoverageObjective _objective = CoverageObjective.MaximizeProteins;
 
     // MTM constraints
     [ObservableProperty] private double _isolationWindowTh = 3.0;
@@ -320,31 +318,73 @@ public partial class MainViewModel : ObservableObject
                 BlibAssayWriter.Write(_candidates, ScheduleResult, blibPath!, assayName));
 
             string libXml = BuildBibliospecLibraryXml(assayName, blibPath);
+            string? libraryListType = null;
+            string registrationDiag;
             try
             {
-                await Task.Run(() => _skylineSession.Execute(c =>
-                {
-                    // Register in the Libraries settings list...
-                    c.AddSettingsListItem("Libraries", libXml, overwrite: true);
-                    // ...then make sure the new library is part of the
-                    // selected-in-document set so Skyline actually
-                    // uses it (settings-list membership alone does not
-                    // activate). Preserves any libraries already
-                    // selected.
-                    var active = c.GetSettingsListSelectedItems("Libraries") ?? Array.Empty<string>();
-                    if (!active.Contains(assayName))
+                (libraryListType, registrationDiag) = await Task.Run(() =>
+                    _skylineSession.Execute(c =>
                     {
-                        var updated = active.Append(assayName).ToArray();
-                        c.SelectSettingsListItems("Libraries", updated);
-                    }
-                    return 0;
-                }));
+                        // Discover Skyline's canonical name for the
+                        // library settings list rather than guessing.
+                        // GetSettingsListTypes() returns the actual
+                        // names accepted by AddSettingsListItem; we
+                        // pick whichever one matches "lib" so this
+                        // tolerates renames across Skyline versions.
+                        var allTypes = c.GetSettingsListTypes() ?? Array.Empty<string>();
+                        var libMatches = allTypes
+                            .Where(t => t.IndexOf("lib", StringComparison.OrdinalIgnoreCase) >= 0)
+                            .ToArray();
+                        if (libMatches.Length == 0)
+                        {
+                            return ((string?)null,
+                                $"GetSettingsListTypes() returned {allTypes.Length} types, "
+                                + $"none containing 'lib'. Skyline reported: "
+                                + string.Join(", ", allTypes));
+                        }
+
+                        // Try each candidate; first one to accept the
+                        // BLIB XML wins. Capture per-attempt failures
+                        // so a diagnostic comes out either way.
+                        var attemptErrors = new List<string>();
+                        foreach (var listType in libMatches)
+                        {
+                            try
+                            {
+                                c.AddSettingsListItem(listType, libXml, overwrite: true);
+                                // Activate in document.
+                                var active = c.GetSettingsListSelectedItems(listType)
+                                    ?? Array.Empty<string>();
+                                if (!active.Contains(assayName))
+                                {
+                                    var updated = active.Append(assayName).ToArray();
+                                    c.SelectSettingsListItems(listType, updated);
+                                }
+                                return ((string?)listType,
+                                    $"registered + selected via list type '{listType}'");
+                            }
+                            catch (Exception inner)
+                            {
+                                attemptErrors.Add($"'{listType}': {inner.Message}");
+                            }
+                        }
+                        return ((string?)null,
+                            $"AddSettingsListItem rejected all candidates "
+                            + $"({string.Join("; ", libMatches)}): "
+                            + string.Join(" | ", attemptErrors));
+                    }));
             }
             catch (Exception ex)
             {
+                libraryListType = null;
+                registrationDiag = $"settings-list probe failed: {ex.Message}";
+            }
+
+            if (libraryListType is null)
+            {
                 StatusMessage = $"BLIB written to {blibPath} "
                     + $"({writeResult.RefSpectraWritten:n0} peptides), "
-                    + $"but registering it with Skyline failed: {ex.Message}. "
+                    + $"but registering it with Skyline failed: {registrationDiag}. "
                     + "Add it manually via Settings > Peptide Settings > Library, "
                     + "then re-run the push so the target tree populates.";
                 return;
@@ -361,7 +401,8 @@ public partial class MainViewModel : ObservableObject
             var scheduledCands = ScheduleResult.ScheduledIndices
                 .Select(i => _candidates[i])
                 .ToList();
-            StatusMessage = $"BLIB registered: {writeResult.RefSpectraWritten:n0} peptides. "
+            StatusMessage = $"BLIB registered ({registrationDiag}): "
+                + $"{writeResult.RefSpectraWritten:n0} peptides. "
                 + "Aligning document peptide + transition filter...";
             var settingsResult = await SkylineSettingsConfigurator.ConfigureAsync(
                 _skylineSession!, scheduledCands);
@@ -934,8 +975,6 @@ public partial class MainViewModel : ObservableObject
         return new SchedulingParameters
         {
             Mode = Mode,
-            EnableLoadBalancing = EnableLoadBalancing,
-            RtAwareCoverSelection = RtAwareCoverSelection,
             Objective = Objective,
             IsolationWindowTh = IsolationWindowTh,
             FragmentTolDa = FragmentTolDa,
@@ -958,8 +997,6 @@ public partial class MainViewModel : ObservableObject
     // reschedule. RescheduleAsync cancels prior runs, so the slider can
     // move freely without queuing stale work.
     partial void OnModeChanged(AcquisitionMode value) => _ = RescheduleAsync();
-    partial void OnEnableLoadBalancingChanged(bool value) => _ = RescheduleAsync();
-    partial void OnRtAwareCoverSelectionChanged(bool value) => _ = RescheduleAsync();
     partial void OnObjectiveChanged(CoverageObjective value) => _ = RescheduleAsync();
     partial void OnIsolationWindowThChanged(double value) => _ = RescheduleAsync();
     partial void OnFragmentTolDaChanged(double value) => _ = RescheduleAsync();

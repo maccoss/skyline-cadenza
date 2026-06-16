@@ -9,9 +9,6 @@ public sealed record SchedulingParameters
     /// <summary>PRM (1 precursor per slot) or MTM (multiplex).</summary>
     public AcquisitionMode Mode { get; init; } = AcquisitionMode.Mtm;
 
-    /// <summary>Whether to add additional peptides per protein after every protein has at least one.</summary>
-    public bool EnableLoadBalancing { get; init; } = true;
-
     /// <summary>Maximum MTM isolation window width (Th). Ignored when <see cref="Mode"/> is PRM.</summary>
     public double IsolationWindowTh { get; init; } = 3.0;
 
@@ -90,20 +87,15 @@ public sealed record SchedulingParameters
     public double NormalizedCollisionEnergy { get; init; } = 28.0;
 
     /// <summary>
-    /// When true, the cover pass picks each protein's peptide whose RT bin
-    /// is currently least saturated rather than its highest-intensity
-    /// peptide. Spreads first peptides across the gradient and avoids
-    /// hot-RT clumping that would otherwise lock low-priority proteins
-    /// out of coverage.
+    /// What the scheduler optimises for after meeting the
+    /// load-balanced RT-budget constraint. See
+    /// <see cref="CoverageObjective"/> for the precise behaviour of
+    /// each mode. Determines both the cover-pass strategy
+    /// (reactive vs look-ahead) and the load-up cap, so no separate
+    /// <c>EnableLoadBalancing</c> / <c>RtAwareCoverSelection</c>
+    /// toggles are needed.
     /// </summary>
-    public bool RtAwareCoverSelection { get; init; } = true;
-
-    /// <summary>
-    /// What the scheduler optimises for after meeting the published
-    /// load-balanced RT-budget constraint. See <see cref="CoverageObjective"/>
-    /// for the precise behaviour of each mode.
-    /// </summary>
-    public CoverageObjective Objective { get; init; } = CoverageObjective.Balanced;
+    public CoverageObjective Objective { get; init; } = CoverageObjective.MaximizeProteins;
 
     /// <summary>Convenience accessor: <see cref="FiringPadSec"/> in minutes.</summary>
     public double FiringPadMin => FiringPadSec / 60.0;
@@ -144,27 +136,35 @@ public enum PeptidePriority
 public enum CoverageObjective
 {
     /// <summary>
-    /// Published webinar algorithm: cover one peptide per group (smallest
-    /// groups first), then round-robin load-up to
-    /// <see cref="SchedulingParameters.MaxPeptidesPerProtein"/>.
+    /// Exact published Stellar-webinar algorithm. Reactive cover pass:
+    /// walk each protein's score-sorted queue and take the first peptide
+    /// that fits the RT budget; on a per-bin budget hit, fall back to
+    /// the next peptide in score order (webinar slide 9). Round-robin
+    /// load-up to <see cref="SchedulingParameters.MaxPeptidesPerProtein"/>.
+    /// Use this when you want a reproducible baseline matching the
+    /// Remes / MacCoss webinar; otherwise prefer
+    /// <see cref="MaximizeProteins"/>.
     /// </summary>
     Balanced,
 
     /// <summary>
     /// Maximise the number of protein groups with at least one peptide
-    /// scheduled. Cover pass prefers peptides that join an existing slot
-    /// (no new slot opened, no cycle budget consumed) over peptides that
-    /// would open a new slot. Load-up is capped at
+    /// scheduled. Look-ahead cover pass: prefers peptides that join an
+    /// existing slot (no new slot opened, no cycle budget consumed),
+    /// falling back to the least-saturated peptide when no joinable
+    /// option exists. Load-up is capped at
     /// <see cref="SchedulingParameters.MinPeptidesPerProtein"/> so the
     /// saved budget stays available for first-peptide coverage of more
-    /// proteins.
+    /// proteins. This is Cadenza's default.
     /// </summary>
     MaximizeProteins,
 
     /// <summary>
-    /// Maximise the total number of scheduled peptides. Cover pass
-    /// unchanged. Load-up uncapped (the per-group max is ignored): the
-    /// round-robin continues until either the cycle budget saturates or
+    /// Maximise the total number of scheduled peptides. Look-ahead
+    /// cover pass (same as <see cref="MaximizeProteins"/> minus the
+    /// joinable-first preference). Load-up uncapped (the per-group max
+    /// is ignored): the round-robin continues until either the cycle
+    /// budget saturates or
     /// every group has exhausted its candidate queue. Round-robin order
     /// is preserved so a protein never receives its k+1th peptide before
     /// every other covered protein has had a chance at its kth.

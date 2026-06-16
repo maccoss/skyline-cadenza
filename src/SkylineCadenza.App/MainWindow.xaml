@@ -84,22 +84,17 @@
                              IsChecked="{Binding Mode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:AcquisitionMode.Mtm}}"/>
                 <RadioButton Content="PRM (1 precursor / slot)" GroupName="mode"
                              IsChecked="{Binding Mode, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:AcquisitionMode.Prm}}"/>
-                <CheckBox Content="Load balancing (fill remaining budget)" IsChecked="{Binding EnableLoadBalancing}" Margin="0,8,0,0"/>
-                <CheckBox Content="Look-ahead load balancing in cover pass"
-                          IsChecked="{Binding RtAwareCoverSelection}" Margin="0,4,0,0"
-                          ToolTip="Both modes respect the RT-budget constraint (webinar algorithm). When on, the cover pass proactively picks each protein's least-saturated peptide instead of waiting for the highest-scoring peptide to fail. Spreads first peptides across the gradient and increases protein-group coverage in heavily-loaded designs."/>
-
                 <!-- Coverage objective -->
                 <TextBlock Text="Coverage objective" FontWeight="Bold" Margin="0,16,0,4"/>
-                <RadioButton Content="Balanced (published algorithm)" GroupName="objective" Margin="0,2,0,0"
+                <RadioButton Content="Balanced" GroupName="objective" Margin="0,2,0,0"
                              IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.Balanced}}"
-                             ToolTip="Cover one peptide per protein, then round-robin load-up to Max peptides per protein."/>
-                <RadioButton Content="Maximize protein coverage" GroupName="objective" Margin="0,2,0,0"
+                             ToolTip="Published Stellar-webinar algorithm. Reactive cover pass: walk each protein's score-sorted queue and take the first peptide that fits; on an RT-budget hit, fall back to the next peptide (slide 9). Round-robin load-up to Max peptides per protein."/>
+                <RadioButton Content="Maximize Protein Coverage" GroupName="objective" Margin="0,2,0,0"
                              IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.MaximizeProteins}}"
-                             ToolTip="Cover pass prefers peptides that join an existing slot for free over peptides that would open a new slot. Load-up is capped at Min peptides per protein, so saved budget stays available for first-peptide coverage of more proteins. Falls back to opening a slot when no joinable peptide exists for a protein."/>
-                <RadioButton Content="Maximize peptide coverage" GroupName="objective" Margin="0,2,0,0"
+                             ToolTip="Default. Look-ahead cover prefers peptides that join an existing slot for free over peptides that would open a new slot. Load-up capped at Min peptides per protein so saved budget feeds first-peptide coverage of more proteins. Falls back to opening a slot when no joinable peptide exists."/>
+                <RadioButton Content="Maximize Peptide Coverage" GroupName="objective" Margin="0,2,0,0"
                              IsChecked="{Binding Objective, Converter={StaticResource EnumEq}, ConverterParameter={x:Static sched:CoverageObjective.MaximizePeptides}}"
-                             ToolTip="Cover pass unchanged. Load-up uncapped: round-robin continues past Max until either the cycle budget saturates or every group has exhausted its candidate queue. Fairness is preserved (a protein never gets its k+1th peptide before every other protein has had a chance at its kth)."/>
+                             ToolTip="Look-ahead cover (no joinable-first preference). Load-up uncapped: round-robin continues past Max until the cycle budget saturates or every group has exhausted its candidate queue. Fairness is preserved (a protein never gets its k+1th peptide before every other protein has had a chance at its kth)."/>
 
                 <!-- MTM constraints -->
                 <TextBlock Text="MTM constraints" FontWeight="Bold" Margin="0,16,0,4"/>
