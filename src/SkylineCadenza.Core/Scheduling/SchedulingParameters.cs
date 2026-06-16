@@ -16,9 +16,17 @@ public sealed record SchedulingParameters
     public double IsolationWindowTh { get; init; } = 3.0;
 
     /// <summary>
-    /// PRM-mode quadrupole isolation window width (Th), centered on the
-    /// precursor m/z. Also used as the floor for solo MTM slots so the
-    /// instrument has room to capture the M+1 isotope.
+    /// Quadrupole isolation window width (Th) the instrument fires around
+    /// each precursor m/z. Used in three places:
+    /// <list type="bullet">
+    /// <item>PRM mode: the isolation width for every scheduled precursor.</item>
+    /// <item>MTM solo slots: the instrument isolation written to the
+    /// Thermo CSV for slots holding a single precursor.</item>
+    /// <item>MTM slot-edge rule: every member's quadrupole window must
+    /// fit fully inside the slot's nominal <see cref="IsolationWindowTh"/>,
+    /// so the scheduler keeps every precursor center at least
+    /// (PrmIsolationWidthTh / 2) from each slot edge.</item>
+    /// </list>
     /// </summary>
     public double PrmIsolationWidthTh { get; init; } = 0.7;
 
@@ -28,7 +36,15 @@ public sealed record SchedulingParameters
     /// <summary>Max concurrent acquisition slots per cycle.</summary>
     public int CycleBudget { get; init; } = 100;
 
-    /// <summary>Seconds of padding added to each side of each peak's retention range.</summary>
+    /// <summary>
+    /// Seconds of padding added to each side of each peak's retention range,
+    /// added on top of the measured peak boundaries. For DIA-NN / Skyline-BLIB
+    /// ingest, the boundaries already include per-replicate peak-shape variance
+    /// (Cadenza takes the union of every replicate's <c>startTime</c> /
+    /// <c>endTime</c>), so this padding handles unmodelled drift like
+    /// gradient drift between the source acquisitions and the new run, not
+    /// the peak shape itself.
+    /// </summary>
     public double FiringPadSec { get; init; } = 15.0;
 
     /// <summary>Width of RT-occupancy bins (min). 0.05 = 3 s.</summary>
@@ -82,6 +98,13 @@ public sealed record SchedulingParameters
     /// </summary>
     public bool RtAwareCoverSelection { get; init; } = true;
 
+    /// <summary>
+    /// What the scheduler optimises for after meeting the published
+    /// load-balanced RT-budget constraint. See <see cref="CoverageObjective"/>
+    /// for the precise behaviour of each mode.
+    /// </summary>
+    public CoverageObjective Objective { get; init; } = CoverageObjective.Balanced;
+
     /// <summary>Convenience accessor: <see cref="FiringPadSec"/> in minutes.</summary>
     public double FiringPadMin => FiringPadSec / 60.0;
 }
@@ -116,6 +139,37 @@ public enum PeptidePriority
     PrecursorQuantity,
     /// <summary>DIA-NN <c>Q.Value</c> (peptide-precursor q-value, ascending).</summary>
     QValue,
+}
+
+public enum CoverageObjective
+{
+    /// <summary>
+    /// Published webinar algorithm: cover one peptide per group (smallest
+    /// groups first), then round-robin load-up to
+    /// <see cref="SchedulingParameters.MaxPeptidesPerProtein"/>.
+    /// </summary>
+    Balanced,
+
+    /// <summary>
+    /// Maximise the number of protein groups with at least one peptide
+    /// scheduled. Cover pass prefers peptides that join an existing slot
+    /// (no new slot opened, no cycle budget consumed) over peptides that
+    /// would open a new slot. Load-up is capped at
+    /// <see cref="SchedulingParameters.MinPeptidesPerProtein"/> so the
+    /// saved budget stays available for first-peptide coverage of more
+    /// proteins.
+    /// </summary>
+    MaximizeProteins,
+
+    /// <summary>
+    /// Maximise the total number of scheduled peptides. Cover pass
+    /// unchanged. Load-up uncapped (the per-group max is ignored): the
+    /// round-robin continues until either the cycle budget saturates or
+    /// every group has exhausted its candidate queue. Round-robin order
+    /// is preserved so a protein never receives its k+1th peptide before
+    /// every other covered protein has had a chance at its kth.
+    /// </summary>
+    MaximizePeptides,
 }
 
 public enum ChargeHandling

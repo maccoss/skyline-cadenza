@@ -31,6 +31,7 @@ public partial class MainViewModel : ObservableObject
     public string SlotsLabel => Mode == AcquisitionMode.Prm ? "PRM slots" : "MTM slots";
     [ObservableProperty] private bool _enableLoadBalancing = true;
     [ObservableProperty] private bool _rtAwareCoverSelection = true;
+    [ObservableProperty] private CoverageObjective _objective = CoverageObjective.Balanced;
 
     // MTM constraints
     [ObservableProperty] private double _isolationWindowTh = 3.0;
@@ -413,6 +414,7 @@ public partial class MainViewModel : ObservableObject
             string? rtOverride = string.IsNullOrWhiteSpace(SkylineRtColumnOverride) ? null : SkylineRtColumnOverride;
             var loadResult = await SkylineLibraryLoader.LoadAsync(
                 _skylineSession!, rtColumnOverride: rtOverride,
+                qValueCutoff: QValueCutoff,
                 progress: progress, cancellationToken: ct);
             if (loadResult.Candidates.Count == 0)
             {
@@ -436,7 +438,18 @@ public partial class MainViewModel : ObservableObject
             LibraryCarafeMatched = _candidates.Count(c => c.Top4Fragments.Length > 0);
 
             LibraryLoaded?.Invoke();
-            string ok = $"Skyline document loaded: {LibraryPrecursors:n0} precursors / {LibraryPeptides:n0} peptides / {LibraryProteinGroups:n0} groups (RT col '{loadResult.RtColumnUsed}', {loadResult.RawRowsFetched:n0} rows).";
+            string rtSource;
+            if (loadResult.BlibPathsConsulted.Count == 0)
+            {
+                rtSource = "all firing windows synthesised";
+            }
+            else
+            {
+                int total = loadResult.PeptidesFromBlibBoundaries + loadResult.PeptidesFromSynthesizedBoundaries;
+                rtSource = $"{loadResult.PeptidesFromBlibBoundaries:n0} of {total:n0} firing windows from BLIB "
+                    + $"({loadResult.BlibPathsConsulted.Count} libr{(loadResult.BlibPathsConsulted.Count == 1 ? "y" : "ies")})";
+            }
+            string ok = $"Skyline document loaded: {LibraryPrecursors:n0} precursors / {LibraryPeptides:n0} peptides / {LibraryProteinGroups:n0} groups (RT col '{loadResult.RtColumnUsed}', {loadResult.RawRowsFetched:n0} rows; {rtSource}).";
             StatusMessage = ok;
             SkylineStatus = ok;
             await RescheduleAsync();
@@ -820,6 +833,7 @@ public partial class MainViewModel : ObservableObject
             Mode = Mode,
             EnableLoadBalancing = EnableLoadBalancing,
             RtAwareCoverSelection = RtAwareCoverSelection,
+            Objective = Objective,
             IsolationWindowTh = IsolationWindowTh,
             FragmentTolDa = FragmentTolDa,
             CycleBudget = CycleBudget,
@@ -843,6 +857,7 @@ public partial class MainViewModel : ObservableObject
     partial void OnModeChanged(AcquisitionMode value) => _ = RescheduleAsync();
     partial void OnEnableLoadBalancingChanged(bool value) => _ = RescheduleAsync();
     partial void OnRtAwareCoverSelectionChanged(bool value) => _ = RescheduleAsync();
+    partial void OnObjectiveChanged(CoverageObjective value) => _ = RescheduleAsync();
     partial void OnIsolationWindowThChanged(double value) => _ = RescheduleAsync();
     partial void OnFragmentTolDaChanged(double value) => _ = RescheduleAsync();
     partial void OnCycleBudgetChanged(int value) => _ = RescheduleAsync();

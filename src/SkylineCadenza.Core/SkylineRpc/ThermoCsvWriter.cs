@@ -95,7 +95,12 @@ public static class ThermoCsvWriter
 
             double mzCenter = (slot.MzMin + slot.MzMax) / 2.0;
             double memberSpan = slot.MzMax - slot.MzMin;
-            double isolationWidth = Math.Max(memberSpan, prmWidth);
+            // Slot-edge rule: every member's PrmIsolationWidthTh quadrupole
+            // window must fit inside the slot. The instrument isolation we
+            // emit is the m/z spread of the members plus PrmIsolationWidthTh
+            // so the windows around the edge members are fully contained.
+            // Solo slots collapse to prmWidth.
+            double isolationWidth = memberSpan + prmWidth;
 
             // Use the co-elution midpoint when meaningful (CoStart < CoStop
             // is guaranteed by the scheduler's strict-co-elution check),

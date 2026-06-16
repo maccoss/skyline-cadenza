@@ -55,6 +55,18 @@ public static class SkylineLibraryLoader
         public required int RawRowsFetched { get; init; }
         public required int DistinctPeptides { get; init; }
         public required int DistinctProteinGroups { get; init; }
+
+        /// <summary>
+        /// Active BLIBs Cadenza read, in priority order (highest variance
+        /// score first). Empty if the document referenced no BLIBs.
+        /// </summary>
+        public IReadOnlyList<string> BlibPathsConsulted { get; init; } = Array.Empty<string>();
+
+        /// <summary>Candidates whose firing window came from a BLIB row.</summary>
+        public int PeptidesFromBlibBoundaries { get; init; }
+
+        /// <summary>Candidates whose firing window was synthesised as RT ± peakHalfWidthMin.</summary>
+        public int PeptidesFromSynthesizedBoundaries { get; init; }
     }
 
     public static async Task<LoadResult> LoadAsync(
@@ -62,6 +74,7 @@ public static class SkylineLibraryLoader
         double peakHalfWidthMin = 0.30,
         int pageSize = 10000,
         string? rtColumnOverride = null,
+        double qValueCutoff = 0.01,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -108,11 +121,72 @@ public static class SkylineLibraryLoader
             PivotReplicate = true,
         };
 
+        // BLIB-first: discover any active BiblioSpec libraries and read
+        // their per-replicate boundaries before we touch the report.
+        // The BuildResultFromBuckets step looks up (modSeq, charge) in
+        // the merged lookup and falls back to RT ± peakHalfWidthMin
+        // synthesis on a miss.
+        progress?.Report("Skyline: looking for BiblioSpec libraries...");
+        var blibPaths = await SkylineBlibDiscovery.DiscoverActiveBlibsAsync(
+            session, progress, cancellationToken);
+        var (blibLookup, blibPathsByPriority) = BuildBlibLookup(blibPaths, qValueCutoff, progress);
+
         // Fast path: ExportReportFromDefinition writes the whole report
         // to disk in one round-trip instead of paginating GetReportRows
         // (which recomputes the report from scratch on each page). On the
         // SEA-AD-class document this is ~20x faster.
-        return await ExportThenReadAsync(session, def, rtColumn, peakHalfWidthMin, progress, cancellationToken);
+        return await ExportThenReadAsync(session, def, rtColumn, peakHalfWidthMin,
+            blibLookup, blibPathsByPriority, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// Read every BLIB and merge into one (modSeq, charge) lookup. When
+    /// two libraries cover the same peptide, the higher-variance library
+    /// wins (measured DIA-NN / PRM beats predicted Carafe beats predicted
+    /// Prosit, all by inspection of per-replicate boundary spread).
+    /// </summary>
+    private static (Dictionary<(string ModSeq, int Charge), BlibRetentionTimeReader.PeakBoundary> Lookup,
+                    List<string> PathsByPriority)
+        BuildBlibLookup(
+            IReadOnlyList<string> blibPaths,
+            double qValueCutoff,
+            IProgress<string>? progress)
+    {
+        var lookup = new Dictionary<(string, int), BlibRetentionTimeReader.PeakBoundary>();
+        var pathsByPriority = new List<string>();
+        if (blibPaths.Count == 0) return (lookup, pathsByPriority);
+
+        var libs = new List<BlibRetentionTimeReader.Library>(blibPaths.Count);
+        foreach (var p in blibPaths)
+        {
+            try
+            {
+                var lib = BlibRetentionTimeReader.Read(p, qValueCutoff);
+                libs.Add(lib);
+                progress?.Report(
+                    $"Skyline: read {Path.GetFileName(p)} "
+                    + $"({lib.Boundaries.Count:n0} peptides, variance score {lib.VarianceScore:0.00}).");
+            }
+            catch (Exception ex)
+            {
+                progress?.Report($"Skyline: could not read {Path.GetFileName(p)} ({ex.Message}). Skipping.");
+            }
+        }
+
+        // Higher variance score = more likely to be a measured library;
+        // its boundaries take precedence per peptide.
+        libs.Sort((a, b) => b.VarianceScore.CompareTo(a.VarianceScore));
+        foreach (var lib in libs)
+        {
+            pathsByPriority.Add(lib.Path);
+            foreach (var kv in lib.Boundaries)
+            {
+                // First library to cover a peptide wins (because libs is
+                // already sorted by priority).
+                if (!lookup.ContainsKey(kv.Key)) lookup[kv.Key] = kv.Value;
+            }
+        }
+        return (lookup, pathsByPriority);
     }
 
     private static async Task<LoadResult> ExportThenReadAsync(
@@ -120,6 +194,8 @@ public static class SkylineLibraryLoader
         ReportDefinition def,
         string rtColumn,
         double peakHalfWidthMin,
+        Dictionary<(string ModSeq, int Charge), BlibRetentionTimeReader.PeakBoundary> blibLookup,
+        List<string> blibPathsByPriority,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
@@ -189,7 +265,8 @@ public static class SkylineLibraryLoader
                 catch { /* skip malformed */ }
             }
 
-            return BuildResultFromBuckets(buckets, rtColumn, parsed, peakHalfWidthMin);
+            return BuildResultFromBuckets(buckets, rtColumn, parsed, peakHalfWidthMin,
+                blibLookup, blibPathsByPriority);
         }
         finally
         {
@@ -201,7 +278,9 @@ public static class SkylineLibraryLoader
         Dictionary<(string ModSeq, int Charge), PrecursorAcc> buckets,
         string rtColumn,
         int rawRowsParsed,
-        double peakHalfWidthMin)
+        double peakHalfWidthMin,
+        Dictionary<(string ModSeq, int Charge), BlibRetentionTimeReader.PeakBoundary> blibLookup,
+        List<string> blibPathsByPriority)
     {
         // peptide -> proteins for parsimony.
         var pepToProts = new Dictionary<string, IReadOnlyList<string>>();
@@ -221,6 +300,7 @@ public static class SkylineLibraryLoader
         var parsimony = ParsimonyEngine.Assign(pepToProts);
 
         var candidates = new List<Candidate>(buckets.Count);
+        int fromBlib = 0, fromSynthesis = 0;
         foreach (var acc in buckets.Values)
         {
             string stripped = StripModifications(acc.ModifiedSequence);
@@ -233,6 +313,27 @@ public static class SkylineLibraryLoader
             Array.Sort(top4);
 
             double summedIntensity = acc.Fragments.Take(take).Sum(f => f.intensity);
+
+            // BLIB-first firing window. The lookup key is the same
+            // (modified sequence, charge) tuple Skyline returned in the
+            // report. If the BLIB used a different modification string
+            // format (e.g. "C[+57.0214637]" vs Skyline's "C[+57.0]") the
+            // direct match will miss and the synthesized boundary will
+            // be used. Normalisation across all sources is a known follow-up.
+            double rtStart, rtStop;
+            if (blibLookup.TryGetValue((acc.ModifiedSequence, acc.PrecursorCharge), out var b))
+            {
+                rtStart = b.RtStart;
+                rtStop = b.RtStop;
+                fromBlib++;
+            }
+            else
+            {
+                rtStart = acc.Rt - peakHalfWidthMin;
+                rtStop = acc.Rt + peakHalfWidthMin;
+                fromSynthesis++;
+            }
+
             candidates.Add(new Candidate
             {
                 PrecursorId = $"{stripped}+{acc.PrecursorCharge}",
@@ -240,8 +341,8 @@ public static class SkylineLibraryLoader
                 ModifiedSequence = acc.ModifiedSequence,
                 PrecursorCharge = acc.PrecursorCharge,
                 PrecursorMz = acc.PrecursorMz,
-                RtStart = acc.Rt - peakHalfWidthMin,
-                RtStop = acc.Rt + peakHalfWidthMin,
+                RtStart = rtStart,
+                RtStop = rtStop,
                 RtApex = acc.Rt,
                 PrecursorQuantity = summedIntensity,
                 QValue = 0.0,
@@ -261,6 +362,9 @@ public static class SkylineLibraryLoader
             RawRowsFetched = rawRowsParsed,
             DistinctPeptides = pepToProts.Count,
             DistinctProteinGroups = candidates.Select(c => c.ProteinGroup).Distinct().Count(),
+            BlibPathsConsulted = blibPathsByPriority,
+            PeptidesFromBlibBoundaries = fromBlib,
+            PeptidesFromSynthesizedBoundaries = fromSynthesis,
         };
     }
 

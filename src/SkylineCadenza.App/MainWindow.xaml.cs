@@ -133,12 +133,6 @@ public partial class MainWindow : Window
             4 => Color.FromHex("#5fa83a"),
             _ => Color.FromHex("#1f6b3a"),
         };
-        string Label(int peptides) => peptides switch
-        {
-            0 => "Not scheduled",
-            5 => "5+ peptides",
-            _ => $"{peptides} peptide{(peptides == 1 ? "" : "s")}",
-        };
 
         // Bucket by peptide count so we can draw one scatter series per
         // color. Bar plots at this density (7k+ proteins) merge into a
@@ -147,10 +141,12 @@ public partial class MainWindow : Window
         var bucketX = new Dictionary<int, List<double>>();
         var bucketY = new Dictionary<int, List<double>>();
         double yMax = double.NegativeInfinity, yMin = double.PositiveInfinity;
+        int actualMaxPeptides = 0;
         for (int i = 0; i < n; i++)
         {
             var row = _vm.ProteinCoverage[i];
             int bucket = Math.Min(row.PeptidesScheduled, 5);
+            if (row.PeptidesScheduled > actualMaxPeptides) actualMaxPeptides = row.PeptidesScheduled;
             double y = row.SummedIntensity > 0 ? Math.Log10(row.SummedIntensity) : 0;
             if (!bucketX.TryGetValue(bucket, out var xs))
             {
@@ -163,6 +159,17 @@ public partial class MainWindow : Window
             if (y > yMax) yMax = y;
             if (y < yMin) yMin = y;
         }
+
+        // "5" or "5+" depending on what's actually in the data. With the
+        // Balanced objective and MaxPeptidesPerProtein = 5, nothing
+        // exceeds 5 so "5+" is misleading. Under MaximizePeptides the
+        // load-up uncaps and 5+ is real.
+        string Label(int peptides) => peptides switch
+        {
+            0 => "Not scheduled",
+            5 => actualMaxPeptides > 5 ? "5+ peptides" : "5 peptides",
+            _ => $"{peptides} peptide{(peptides == 1 ? "" : "s")}",
+        };
 
         // Draw in ascending bucket order so higher peptide counts paint on
         // top of the "not scheduled" greys (more visible).
@@ -178,7 +185,14 @@ public partial class MainWindow : Window
 
         plt.XLabel("Protein group rank (sorted by intensity)");
         plt.YLabel("log10(sum of peptide intensity)");
-        plt.Title($"Protein coverage by peptides scheduled (n = {n:n0} groups)");
+        // Title reports covered-of-total rather than just total. The
+        // not-scheduled greys are present in the data series but tend to
+        // be overdrawn by adjacent colored markers at this density (~10
+        // dots / px), so the visible curve effectively shows the covered
+        // set only.
+        int notScheduled = bucketX.TryGetValue(0, out var b0) ? b0.Count : 0;
+        int covered = n - notScheduled;
+        plt.Title($"Protein coverage by peptides scheduled ({covered:n0} of {n:n0} groups covered)");
 
         ApplyPlotStyle(plt);
 

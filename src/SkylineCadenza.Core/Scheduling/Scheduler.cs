@@ -103,6 +103,74 @@ public static class Scheduler
             }
         }
 
+        // Read-only feasibility check: true iff `candIndex` could be merged
+        // into some existing MTM slot right now without opening a new one.
+        // Mirrors the merge-half of TrySchedule and MUST be kept in sync
+        // with it. Used by the MaximizeProteins cover pass to prefer
+        // peptides that don't consume a slot.
+        bool CanJoinExistingSlot(int candIndex)
+        {
+            if (parameters.Mode == AcquisitionMode.Prm) return false;
+            var prec = candidates[candIndex];
+            var frags = prec.Top4Fragments;
+            if (frags.Length == 0) return false;
+
+            double mz = prec.PrecursorMz;
+            double rtStart = prec.RtStart;
+            double rtStop = prec.RtStop;
+            double rtStartPad = rtStart - padMin;
+            double rtStopPad = rtStop + padMin;
+            double windowTh = parameters.IsolationWindowTh;
+            // Slot-edge rule: see TrySchedule for the derivation. Every
+            // member's PrmIsolationWidthTh quadrupole window must fit
+            // inside the slot, so center spans are capped at
+            // (windowTh - PrmIsolationWidthTh).
+            double centerSpanBudget = Math.Max(0.0, windowTh - parameters.PrmIsolationWidthTh);
+
+            int mzBinLo = (int)Math.Floor(mz - windowTh);
+            int mzBinHi = (int)Math.Floor(mz + windowTh);
+            var seen = new HashSet<int>();
+            for (int bin = mzBinLo; bin <= mzBinHi; bin++)
+            {
+                if (!slotByMzBin.TryGetValue(bin, out var sids)) continue;
+                foreach (int sid in sids)
+                {
+                    if (!seen.Add(sid)) continue;
+                    var slot = slots[sid];
+
+                    double newMzMin = Math.Min(slot.MzMin, mz);
+                    double newMzMax = Math.Max(slot.MzMax, mz);
+                    if (newMzMax - newMzMin > centerSpanBudget) continue;
+
+                    double newCoStart = Math.Max(slot.CoStart, rtStart);
+                    double newCoStop = Math.Min(slot.CoStop, rtStop);
+                    if (newCoStart >= newCoStop) continue;
+
+                    if (FragmentClash.AnyWithin(frags, slot.Fragments, parameters.FragmentTolDa))
+                        continue;
+
+                    if (parameters.ChargeHandling == ChargeHandling.SameChargePerSlot
+                        && slot.MemberIndices.Count > 0
+                        && candidates[slot.MemberIndices[0]].PrecursorCharge != prec.PrecursorCharge)
+                        continue;
+
+                    double newRtStartPad = Math.Min(slot.RtStart, rtStartPad);
+                    double newRtStopPad = Math.Max(slot.RtStop, rtStopPad);
+                    var (oldA, oldB) = RtToBinRange(slot.RtStart, slot.RtStop);
+                    var (extA, extB) = RtToBinRange(newRtStartPad, newRtStopPad);
+                    int extLoFrom = extA, extLoTo = Math.Min(oldA, extB);
+                    int extHiFrom = Math.Max(oldB, extA), extHiTo = extB;
+                    if (extLoFrom < extLoTo && RangeMax(slotsPerBin, extLoFrom, extLoTo) + 1 > parameters.CycleBudget)
+                        continue;
+                    if (extHiFrom < extHiTo && RangeMax(slotsPerBin, extHiFrom, extHiTo) + 1 > parameters.CycleBudget)
+                        continue;
+
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // Try to schedule a single precursor. Returns the slot id it was
         // assigned to, or -1 if it didn't fit.
         int TrySchedule(int candIndex)
@@ -115,6 +183,14 @@ public static class Scheduler
             double rtStopPad = rtStop + padMin;
             var frags = prec.Top4Fragments;
             double windowTh = parameters.Mode == AcquisitionMode.Prm ? 0.0 : parameters.IsolationWindowTh;
+            // Slot-edge rule: every member's quadrupole window
+            // (PrmIsolationWidthTh wide, centered on the precursor m/z)
+            // must fit fully inside the slot's nominal isolation window.
+            // Equivalently, every member's center must sit at least
+            // PrmIsolationWidthTh / 2 from each edge, so the max span of
+            // precursor centers in one slot is (windowTh -
+            // PrmIsolationWidthTh).
+            double centerSpanBudget = Math.Max(0.0, windowTh - parameters.PrmIsolationWidthTh);
 
             if (parameters.Mode == AcquisitionMode.Mtm && frags.Length > 0)
             {
@@ -131,7 +207,7 @@ public static class Scheduler
 
                         double newMzMin = Math.Min(slot.MzMin, mz);
                         double newMzMax = Math.Max(slot.MzMax, mz);
-                        if (newMzMax - newMzMin > windowTh) continue;
+                        if (newMzMax - newMzMin > centerSpanBudget) continue;
 
                         // Strict co-elution: intersection of unpadded peak
                         // ranges must remain non-empty.
@@ -321,7 +397,19 @@ public static class Scheduler
         var scheduledPerGroup = new Dictionary<string, int>(groupOrder.Count);
         foreach (var g in groupOrder) { groupQueueCursor[g] = 0; scheduledPerGroup[g] = 0; }
         var coveredGroups = new HashSet<string>();
-        int maxPerGroup = Math.Max(1, parameters.MaxPeptidesPerProtein);
+        // Effective load-up cap by objective:
+        //   Balanced         - user's MaxPeptidesPerProtein.
+        //   MaximizeProteins - clamp to Min so saved budget stays free for
+        //                      other proteins' first peptide.
+        //   MaximizePeptides - no per-group cap; round-robin order in the
+        //                      load-up loop preserves fairness.
+        int rawMax = Math.Max(1, parameters.MaxPeptidesPerProtein);
+        int effectiveMaxPerGroup = parameters.Objective switch
+        {
+            CoverageObjective.MaximizeProteins => Math.Max(1, parameters.MinPeptidesPerProtein),
+            CoverageObjective.MaximizePeptides => int.MaxValue,
+            _ => rawMax,
+        };
 
         // Pass 1: cover one peptide per group.
         //
@@ -358,7 +446,30 @@ public static class Scheduler
             int chosenSid = -1;
             int chosenCandIdx = -1;
 
-            if (parameters.RtAwareCoverSelection)
+            // MaximizeProteins: prefer a peptide that joins an existing
+            // slot for free over one that opens a new slot. Walk the queue
+            // in score order, accept the first joinable hit. If no peptide
+            // is joinable, fall through to the regular cover branch so the
+            // protein still gets covered by opening a slot (matching the
+            // user's intent that this objective should not silently drop
+            // hard-to-place proteins).
+            if (parameters.Objective == CoverageObjective.MaximizeProteins)
+            {
+                for (int q = cursor; q < queue.Count; q++)
+                {
+                    int candIdx = queue[q];
+                    if (!CanJoinExistingSlot(candIdx)) continue;
+                    int sid = TrySchedule(candIdx);
+                    if (sid >= 0)
+                    {
+                        chosenSid = sid;
+                        chosenCandIdx = candIdx;
+                        break;
+                    }
+                }
+            }
+
+            if (chosenSid < 0 && parameters.RtAwareCoverSelection)
             {
                 int bestCandIdx = -1;
                 int bestMaxLoad = int.MaxValue;
@@ -411,7 +522,7 @@ public static class Scheduler
                 // Cursor stays at 0. Load-up will re-walk and skip
                 // already-scheduled candidates.
             }
-            else
+            else if (chosenSid < 0)
             {
                 while (cursor < queue.Count)
                 {
@@ -448,7 +559,7 @@ public static class Scheduler
                 foreach (var g in groupOrder)
                 {
                     if (!coveredGroups.Contains(g)) continue;
-                    if (scheduledPerGroup[g] >= maxPerGroup) continue;
+                    if (scheduledPerGroup[g] >= effectiveMaxPerGroup) continue;
                     var queue = groupToRanked[g];
                     int cursor = groupQueueCursor[g];
                     while (cursor < queue.Count)

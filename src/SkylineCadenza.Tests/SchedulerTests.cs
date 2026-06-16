@@ -109,6 +109,61 @@ public class SchedulerTests
     }
 
     [Fact]
+    public void Mtm_slot_fit_rejects_precursor_whose_solo_window_would_overhang_slot_edge()
+    {
+        // Slot-edge rule: every member's PrmIsolationWidthTh quadrupole
+        // window must fit fully inside the slot. So every member center
+        // must sit at least PrmIsolationWidthTh / 2 from each edge.
+        //
+        // With IsolationWindowTh = 3.0 and PrmIsolationWidthTh = 0.7 the
+        // edge clearance is 0.35 Th. Centers 2.4 Th apart cannot both
+        // satisfy that: whichever member's edge is closer would sit
+        // 0.30 Th from the slot edge, overhanging by 0.05 Th. The
+        // scheduler must split them into two slots.
+        var cands = new[]
+        {
+            Make("A", 500.0, 5.0, 5.4, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("B", 502.4, 5.1, 5.5, "G2", fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            IsolationWindowTh = 3.0,
+            PrmIsolationWidthTh = 0.7,
+        });
+
+        Assert.Equal(2, result.ScheduledIndices.Length);
+        Assert.Equal(2, result.Slots.Length);
+    }
+
+    [Fact]
+    public void Mtm_slot_fit_merges_precursors_when_both_solo_windows_clear_the_slot_edges()
+    {
+        // Same edge rule as above. Centers 2.2 Th apart leave 0.40 Th
+        // of clearance at the tighter edge - 0.05 Th past the 0.35 Th
+        // the solo window needs - so both members' quadrupole windows
+        // fit inside the slot and the scheduler should multiplex them
+        // into one slot.
+        var cands = new[]
+        {
+            Make("A", 500.0, 5.0, 5.4, "G1", fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("B", 502.2, 5.1, 5.5, "G2", fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            IsolationWindowTh = 3.0,
+            PrmIsolationWidthTh = 0.7,
+        });
+
+        Assert.Equal(2, result.ScheduledIndices.Length);
+        Assert.Single(result.Slots);
+        Assert.Equal(2, result.Slots[0].MemberIndices.Count);
+    }
+
+    [Fact]
     public void Prm_mode_forces_one_precursor_per_slot()
     {
         // Same inputs that would multiplex in MTM mode; PRM should keep them
@@ -193,6 +248,106 @@ public class SchedulerTests
         var result = Scheduler.Run(cands, new SchedulingParameters { CycleBudget = 100 });
         Assert.Equal(2, result.ScheduledIndices.Length);
         Assert.Equal(2, result.ProteinGroupsCovered);
+    }
+
+    [Fact]
+    public void MaximizeProteins_prefers_joinable_peptide_to_free_slot_for_another_protein()
+    {
+        // Budget = 2, four proteins all co-eluting in [5.0, 5.4].
+        //
+        // G1: A1 mz 500.0                             - opens slot s1.
+        // G2: B1 mz 600.0  (best score, would open new slot)
+        //     B2 mz 500.5  (lower score, joins s1: a 0.5 Th center
+        //                   gap easily clears the slot-edge rule for
+        //                   the default 3.0 / 0.7 settings, and the
+        //                   fragments don't clash with A1).
+        // G3: C  mz 700.0  (needs a new slot).
+        // G4: D  mz 800.0  (needs a new slot).
+        //
+        // Balanced: cover picks G2's best (B1) → opens slot s2, slot
+        // count at this RT = 2. G3 can't open a third slot → dropped.
+        // G4 dropped. Total 2 proteins.
+        //
+        // MaximizeProteins: cover sees B2 is joinable, takes it →
+        // s1 carries G1+G2 (count stays 1). G3 opens s2 (count 2).
+        // G4 still blocked. Total 3 proteins.
+        var cands = new[]
+        {
+            Make("G1.A1", 500.0, 5.0, 5.4, "G1", quantity: 5e6,
+                fragments: new[] { 100.0, 200.0, 300.0, 400.0 }),
+            Make("G2.B1", 600.0, 5.0, 5.4, "G2", quantity: 3e6,
+                fragments: new[] { 110.0, 210.0, 310.0, 410.0 }),
+            Make("G2.B2", 500.5, 5.0, 5.4, "G2", quantity: 1e6,
+                fragments: new[] { 150.0, 250.0, 350.0, 450.0 }),
+            Make("G3.C",  700.0, 5.0, 5.4, "G3", quantity: 3e6,
+                fragments: new[] { 120.0, 220.0, 320.0, 420.0 }),
+            Make("G4.D",  800.0, 5.0, 5.4, "G4", quantity: 2e6,
+                fragments: new[] { 130.0, 230.0, 330.0, 430.0 }),
+        };
+
+        var balanced = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 2,
+            Objective = CoverageObjective.Balanced,
+        });
+        var maxProteins = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 2,
+            Objective = CoverageObjective.MaximizeProteins,
+        });
+
+        Assert.Equal(2, balanced.ProteinGroupsCovered);
+        Assert.Equal(3, maxProteins.ProteinGroupsCovered);
+    }
+
+    [Fact]
+    public void MaximizePeptides_uncaps_load_up_but_keeps_round_robin_fairness()
+    {
+        // Two proteins, four peptides each, well-separated RTs so every
+        // peptide opens its own slot (no MTM merging here). With Max = 2:
+        //
+        //   Balanced: 2 peptides per protein → 4 total.
+        //   MaximizePeptides: load-up keeps going past Max →
+        //                     all 8 peptides scheduled.
+        //
+        // Round-robin order is preserved by construction: the load-up
+        // loop iterates groups in order and adds at most one peptide per
+        // group per pass.
+        var cands = new[]
+        {
+            Make("G1.a", 500.0, 5.0, 5.4, "G1", quantity: 4e6),
+            Make("G1.b", 510.0, 6.0, 6.4, "G1", quantity: 3e6),
+            Make("G1.c", 520.0, 7.0, 7.4, "G1", quantity: 2e6),
+            Make("G1.d", 530.0, 8.0, 8.4, "G1", quantity: 1e6),
+            Make("G2.a", 600.0, 5.5, 5.9, "G2", quantity: 4e6),
+            Make("G2.b", 610.0, 6.5, 6.9, "G2", quantity: 3e6),
+            Make("G2.c", 620.0, 7.5, 7.9, "G2", quantity: 2e6),
+            Make("G2.d", 630.0, 8.5, 8.9, "G2", quantity: 1e6),
+        };
+
+        var balanced = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 2,
+            Objective = CoverageObjective.Balanced,
+        });
+        var maxPeptides = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            MaxPeptidesPerProtein = 2,
+            Objective = CoverageObjective.MaximizePeptides,
+        });
+
+        Assert.Equal(4, balanced.ScheduledIndices.Length);
+        Assert.Equal(8, maxPeptides.ScheduledIndices.Length);
+
+        // Fairness check: at every prefix of the load-up sequence the
+        // per-group counts differ by at most 1. We can verify the final
+        // state symmetrically: both groups end with 4 peptides each.
+        int g1 = maxPeptides.ScheduledIndices.Count(i => cands[i].ProteinGroup == "G1");
+        int g2 = maxPeptides.ScheduledIndices.Count(i => cands[i].ProteinGroup == "G2");
+        Assert.Equal(4, g1);
+        Assert.Equal(4, g2);
     }
 
     [Fact]

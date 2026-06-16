@@ -190,7 +190,7 @@ For local smoke testing without going through the zip+install cycle, run `tools/
 | Thermo CSV export | ✅ working |
 | Skyline auto-connect on launch | ✅ working |
 | Push targets to Skyline (peptide import) | 🟡 wired against `--import-transition-list`; needs field validation against a few document conventions |
-| Load library from running Skyline document | 🟡 preview; report probe lands, candidate-builder column-mapping pending |
+| Load library from running Skyline document | ✅ working; reads per-peptide BLIB peak boundaries for the firing window, falls back to synthesised `RT ± 18 s` only when no BLIB covers the peptide |
 | Per-GPF heatmap panels | ⏳ single combined heatmap today; per-GPF stacked panels still pending |
 
 ## References

@@ -19,4 +19,12 @@
     <ProjectReference Include="..\SkylineCadenza.Core\SkylineCadenza.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Repo-level testdata copied alongside the test assembly. Tests
+         resolve paths through AppContext.BaseDirectory + "testdata". -->
+    <Content Include="..\..\testdata\sample.blib" Link="testdata\sample.blib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
