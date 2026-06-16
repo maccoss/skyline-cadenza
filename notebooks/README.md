@@ -24,8 +24,21 @@ differ on a synthetic dataset. The notebook is structured as:
 
 ## Re-render after Cadenza scheduler changes
 
+The repo's Python environment lives in `.venv/` at the repo root and is
+managed with `uv`. Create / refresh it once:
+
 ```bash
 # From the repo root.
+uv sync   # creates .venv/ and installs matplotlib, jupyter, ipykernel, ...
+```
+
+Visual Studio Code's Python + Jupyter extensions auto-detect the `.venv` as
+the workspace's interpreter. From the command line, activate with
+`source .venv/bin/activate` (or `.venv\Scripts\activate` on Windows) before
+running `jupyter` / `python` commands.
+
+```bash
+# From the repo root, with the venv active.
 dotnet build src/SkylineCadenza.Cli -c Release   # one-time; the notebook expects this
 python notebooks/_build_notebook.py              # rebuild the .ipynb from cells
 jupyter nbconvert --to notebook --execute \
