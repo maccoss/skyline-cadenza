@@ -73,17 +73,55 @@ public class PeptideTransitionListBuilderTests
         var csv = PeptideTransitionListBuilder.Build(cands, schedule);
         var lines = csv.Trim().Split('\n');
 
-        // Header + 2 fragment rows.
-        Assert.Equal(3, lines.Length);
+        // Header + 3 precursor isotope rows + 2 fragment rows.
+        Assert.Equal(1 + PeptideTransitionListBuilder.PrecursorIsotopesPerPeptide + 2,
+            lines.Length);
         Assert.StartsWith("Protein Name,Peptide Modified Sequence,", lines[0]);
 
-        // Each fragment row should report Product Charge = 2, not 1.
-        var fields1 = lines[1].Split(',');
-        var fields2 = lines[2].Split(',');
-        Assert.Equal("404.1928", fields1[4]); // Product m/z
-        Assert.Equal("2", fields1[5]);        // Product Charge
-        Assert.Equal("447.7089", fields2[4]);
-        Assert.Equal("2", fields2[5]);
+        // Fragment rows follow the precursor isotope rows; check their
+        // Product Charge to confirm the +2 fragments survive.
+        var fragRow1 = lines[1 + PeptideTransitionListBuilder.PrecursorIsotopesPerPeptide]
+            .Split(',');
+        var fragRow2 = lines[2 + PeptideTransitionListBuilder.PrecursorIsotopesPerPeptide]
+            .Split(',');
+        Assert.Equal("404.1928", fragRow1[4]); // Product m/z
+        Assert.Equal("2", fragRow1[5]);        // Product Charge
+        Assert.Equal("447.7089", fragRow2[4]);
+        Assert.Equal("2", fragRow2[5]);
+    }
+
+    [Fact]
+    public void Build_EmitsPrecursorIsotopeRows_M0M1M2_PerPeptide()
+    {
+        // Skyline detects a precursor transition when Product Charge ==
+        // Precursor Charge and Product m/z is at the precursor's
+        // monoisotope spacing. M+0 = precursor m/z; M+1 = +1.003355 / z;
+        // M+2 = +2 * 1.003355 / z.
+        const int charge = 2;
+        const double precursorMz = 500.0000;
+        var cands = new[]
+        {
+            Make("PEPTIDE", "PEPTIDE", charge, precursorMz, 5.0, "P1",
+                new FragmentIon(200.0, 100.0, 1)),
+        };
+        var schedule = OneSlot(cands);
+        var lines = PeptideTransitionListBuilder.Build(cands, schedule)
+            .Trim().Split('\n');
+
+        // Header + 3 precursor isotope rows + 1 fragment row.
+        Assert.Equal(1 + PeptideTransitionListBuilder.PrecursorIsotopesPerPeptide + 1,
+            lines.Length);
+
+        const double neutronMass = 1.003355;
+        for (int isotope = 0; isotope < PeptideTransitionListBuilder.PrecursorIsotopesPerPeptide;
+             isotope++)
+        {
+            var fields = lines[1 + isotope].Split(',');
+            double expectedMz = precursorMz + neutronMass * isotope / charge;
+            Assert.Equal(expectedMz, double.Parse(fields[4],
+                System.Globalization.CultureInfo.InvariantCulture), precision: 4);
+            Assert.Equal(charge.ToString(), fields[5]); // Product Charge == Precursor Charge
+        }
     }
 
     [Fact]
@@ -97,20 +135,28 @@ public class PeptideTransitionListBuilderTests
         var csv = PeptideTransitionListBuilder.Build(cands, schedule);
 
         int rowCount = csv.Trim().Split('\n').Length - 1; // exclude header
-        Assert.Equal(PeptideTransitionListBuilder.FragmentsPerPeptide, rowCount);
+        // Precursor isotope rows are emitted in addition to the
+        // fragment cap.
+        Assert.Equal(
+            PeptideTransitionListBuilder.PrecursorIsotopesPerPeptide
+            + PeptideTransitionListBuilder.FragmentsPerPeptide,
+            rowCount);
     }
 
     [Fact]
-    public void Build_FragmentlessPeptide_EmitsOnePrecursorOnlyRow()
+    public void Build_FragmentlessPeptide_StillEmitsPrecursorIsotopeRows()
     {
         var cands = new[] { Make("NOFRAGS", "NOFRAGS", 2, 400.0, 5.0, "P1") };
         var schedule = OneSlot(cands);
         var csv = PeptideTransitionListBuilder.Build(cands, schedule);
         var lines = csv.Trim().Split('\n');
 
-        Assert.Equal(2, lines.Length); // header + 1 row
-        var fields = lines[1].Split(',');
-        Assert.Equal(string.Empty, fields[4]); // Product m/z blank
-        Assert.Equal(string.Empty, fields[5]); // Product Charge blank
+        // Header + 3 precursor isotope rows + 1 precursor-only row
+        // (the fragmentless fallback).
+        Assert.Equal(1 + PeptideTransitionListBuilder.PrecursorIsotopesPerPeptide + 1,
+            lines.Length);
+        var fallback = lines[^1].Split(',');
+        Assert.Equal(string.Empty, fallback[4]); // Product m/z blank
+        Assert.Equal(string.Empty, fallback[5]); // Product Charge blank
     }
 }

@@ -63,6 +63,24 @@ public static class PeptideTransitionListBuilder
             string protein = c.ProteinGroup;
             string peptide = NormalizeModifiedSequence(c.ModifiedSequence);
 
+            // Precursor isotope rows first (M+0, M+1, M+2) so they
+            // appear as precursor transitions in the document tree
+            // alongside the fragment rows. Skyline recognizes
+            // Product Charge == Precursor Charge with Product m/z
+            // close to the precursor's monoisotope spacing as a
+            // precursor transition. Mass step = 1.003355 Da per ^13C
+            // -> ^12C neutron offset.
+            for (int isotope = 0; isotope < PrecursorIsotopesPerPeptide; isotope++)
+            {
+                double isotopeMz = c.PrecursorMz
+                    + NeutronMassDa * isotope / c.PrecursorCharge;
+                AppendRow(sb, inv, protein, peptide, c.PrecursorCharge,
+                    c.PrecursorMz,
+                    productMz: isotopeMz,
+                    productCharge: c.PrecursorCharge,
+                    c.RtApex, windowMin, note);
+            }
+
             if (c.Fragments.Length == 0)
             {
                 AppendRow(sb, inv, protein, peptide, c.PrecursorCharge,
@@ -84,6 +102,23 @@ public static class PeptideTransitionListBuilder
         }
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Mass difference between two adjacent precursor isotopes in
+    /// Daltons. The monoisotopic envelope's spacing in m/z space is
+    /// this value divided by the precursor charge.
+    /// </summary>
+    private const double NeutronMassDa = 1.003355;
+
+    /// <summary>
+    /// Number of precursor isotopes (M+0, M+1, M+2) emitted per
+    /// peptide. Must match the
+    /// <c>--full-scan-precursor-threshold</c> value
+    /// <see cref="SkylineRpc.SkylineSettingsConfigurator"/> sends so
+    /// the document tree's precursor nodes line up with what
+    /// Skyline's MS1 chromatogram extractor actually pulls.
+    /// </summary>
+    public const int PrecursorIsotopesPerPeptide = 3;
 
     private static void AppendRow(
         StringBuilder sb, CultureInfo inv,
