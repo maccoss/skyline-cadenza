@@ -317,103 +317,57 @@ public partial class MainViewModel : ObservableObject
             var writeResult = await Task.Run(() =>
                 BlibAssayWriter.Write(_candidates, ScheduleResult, blibPath!, assayName));
 
-            string? libraryListType = null;
+            // AddSettingsListItem cannot register a Spectral Libraries
+            // entry. Skyline's JsonToolServer.DeserializeSettingsItem
+            // looks up `Deserialize(XmlReader)` on the generic argument
+            // of SettingsListBase<T> - for the Spectral Libraries list
+            // T is the abstract LibrarySpec, which has no static
+            // Deserialize method (only its concrete subclasses do). So
+            // we route through the SkylineCmd path instead via
+            // RunCommand: --add-library-name + --add-library-path,
+            // which calls CommandLine.SetLibrary(name, path). That
+            // method invokes LibrarySpec.CreateFromPath internally,
+            // which dispatches on the file extension to construct the
+            // right concrete subclass (BiblioSpecLiteSpec for .blib)
+            // and appends it to PeptideSettings.Libraries.LibrarySpecs
+            // - the "active" list - in one shot.
             string registrationDiag;
+            bool registered;
             try
             {
-                (libraryListType, registrationDiag) = await Task.Run(() =>
-                    _skylineSession.Execute(c =>
+                string addLibOutput = await Task.Run(() =>
+                    _skylineSession.Execute(c => c.RunCommand(new[]
                     {
-                        // Identify the Spectral Libraries settings list
-                        // specifically - matching on "lib" alone hits
-                        // "Ion Mobility Libraries" and "Optimization
-                        // Libraries" which silently accept arbitrary XML
-                        // via AddSettingsListItem and pollute the
-                        // document with garbage entries.
-                        var allTypes = c.GetSettingsListTypes() ?? Array.Empty<string>();
-                        string? listType = allTypes.FirstOrDefault(t =>
-                            t.IndexOf("spectral", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                            t.IndexOf("librar", StringComparison.OrdinalIgnoreCase) >= 0);
-                        if (listType is null)
-                        {
-                            return ((string?)null,
-                                $"no 'Spectral Libraries'-like settings list in "
-                                + $"GetSettingsListTypes(). Skyline reported: "
-                                + string.Join(", ", allTypes));
-                        }
-
-                        // Build a list of XML candidates. The first is
-                        // adapted from an existing library on the
-                        // document if one is there (guaranteed to be the
-                        // shape Skyline accepts because we just read it
-                        // out); the rest are progressive fallbacks for
-                        // a fresh document with no libraries yet.
-                        var xmlCandidates = new List<(string Source, string Xml)>();
-                        try
-                        {
-                            var existingNames = c.GetSettingsListNames(listType, null);
-                            if (existingNames is { Length: > 0 })
-                            {
-                                string existingXml = c.GetSettingsListItem(listType, existingNames[0]);
-                                if (!string.IsNullOrWhiteSpace(existingXml))
-                                {
-                                    xmlCandidates.Add((
-                                        $"adapted from '{existingNames[0]}'",
-                                        AdaptLibrarySpecXml(existingXml, assayName, blibPath)));
-                                }
-                            }
-                        }
-                        catch { /* no existing libs - fall through to defaults */ }
-                        xmlCandidates.AddRange(BuildBibliospecLibraryXmlCandidates(assayName, blibPath));
-
-                        var attemptErrors = new List<string>();
-                        foreach (var (source, candidateXml) in xmlCandidates)
-                        {
-                            try
-                            {
-                                c.AddSettingsListItem(listType, candidateXml, overwrite: true);
-                            }
-                            catch (Exception addEx)
-                            {
-                                attemptErrors.Add($"{source}: AddSettingsListItem -> {addEx.Message}");
-                                continue;
-                            }
-                            // Add succeeded; try to select. If select
-                            // fails, leave the entry registered and
-                            // report so the user can activate manually.
-                            try
-                            {
-                                var active = c.GetSettingsListSelectedItems(listType)
-                                    ?? Array.Empty<string>();
-                                if (!active.Contains(assayName))
-                                {
-                                    var updated = active.Append(assayName).ToArray();
-                                    c.SelectSettingsListItems(listType, updated);
-                                }
-                                return ((string?)listType,
-                                    $"registered + selected via '{listType}' ({source})");
-                            }
-                            catch (Exception selectEx)
-                            {
-                                return ((string?)listType,
-                                    $"registered via '{listType}' ({source}), "
-                                    + $"but SelectSettingsListItems failed: {selectEx.Message}. "
-                                    + $"Activate manually via Settings > Peptide Settings > Library.");
-                            }
-                        }
-                        return ((string?)null,
-                            $"AddSettingsListItem against '{listType}' rejected every XML "
-                            + $"candidate ({xmlCandidates.Count} tried): "
-                            + string.Join(" | ", attemptErrors));
-                    }));
+                        "--add-library-name=" + assayName,
+                        "--add-library-path=" + blibPath!,
+                    })));
+                if (string.IsNullOrWhiteSpace(addLibOutput))
+                {
+                    registered = true;
+                    registrationDiag = "registered + activated via --add-library-name/--add-library-path";
+                }
+                else
+                {
+                    // Skyline's CommandLine writes failure reasons to
+                    // stdout (file doesn't exist, name conflict, etc.).
+                    // Any non-empty output means the command at minimum
+                    // had something to say; we capture it verbatim and
+                    // surface it - but don't bail, because some flags
+                    // that succeed still echo informational text.
+                    registered = !addLibOutput.Contains("Error", StringComparison.OrdinalIgnoreCase)
+                              && !addLibOutput.Contains("conflict", StringComparison.OrdinalIgnoreCase);
+                    registrationDiag = registered
+                        ? $"--add-library-name/--add-library-path: {addLibOutput.Trim()}"
+                        : $"library registration failed: {addLibOutput.Trim()}";
+                }
             }
             catch (Exception ex)
             {
-                libraryListType = null;
-                registrationDiag = $"settings-list probe failed: {ex.Message}";
+                registered = false;
+                registrationDiag = $"RunCommand --add-library-* threw: {ex.Message}";
             }
 
-            if (libraryListType is null)
+            if (!registered)
             {
                 StatusMessage = $"BLIB written to {blibPath} "
                     + $"({writeResult.RefSpectraWritten:n0} peptides), "
@@ -550,81 +504,6 @@ public partial class MainViewModel : ObservableObject
         return Path.Combine(dir, assayName + ".blib");
     }
 
-    /// <summary>
-    /// Ordered list of BiblioSpec-Lite library XML shapes to try
-    /// against <c>AddSettingsListItem</c> when the document has no
-    /// existing library to adapt from. Each candidate is paired with a
-    /// short tag so a successful registration can report which shape
-    /// Skyline accepted (we lock that in next round if it ends up
-    /// being version-stable). Skyline reads the BLIB file from
-    /// <c>file_name_hint</c> at attach time.
-    /// </summary>
-    private static IEnumerable<(string Source, string Xml)> BuildBibliospecLibraryXmlCandidates(
-        string name, string filePath)
-    {
-        string escName = System.Security.SecurityElement.Escape(name);
-        string escPath = System.Security.SecurityElement.Escape(filePath);
-        string lsid = System.Security.SecurityElement.Escape(
-            $"urn:lsid:cadenza:spectral_library:bibliospec:nr:{name}");
-
-        // Most-complete shape first: name + file_name_hint + revision
-        // + lsid. Matches what Skyline writes back when an existing
-        // BiblioSpec library is serialised into a saved .sky document.
-        yield return ("bibliospec_lite_library/full",
-            $"<bibliospec_lite_library name=\"{escName}\" "
-            + $"file_name_hint=\"{escPath}\" revision=\"0\" lsid=\"{lsid}\" />");
-
-        yield return ("bibliospec_lite_library/no-lsid",
-            $"<bibliospec_lite_library name=\"{escName}\" "
-            + $"file_name_hint=\"{escPath}\" revision=\"0\" />");
-
-        yield return ("bibliospec_lite_library/minimal",
-            $"<bibliospec_lite_library name=\"{escName}\" file_name_hint=\"{escPath}\" />");
-
-        // Alternative root element name: some Skyline versions might
-        // register the spec class under bibliospec_lite_spec instead.
-        yield return ("bibliospec_lite_spec/minimal",
-            $"<bibliospec_lite_spec name=\"{escName}\" file_name_hint=\"{escPath}\" />");
-    }
-
-    /// <summary>
-    /// Take an existing library XML (the shape Skyline just gave us
-    /// back from <c>GetSettingsListItem</c>) and replace the
-    /// <c>name</c> and <c>file_name_hint</c> attributes so the result
-    /// points at our new BLIB. Everything else - root element, lsid
-    /// schema, revision, etc. - stays as Skyline wrote it.
-    /// </summary>
-    private static string AdaptLibrarySpecXml(string templateXml, string newName, string newPath)
-    {
-        try
-        {
-            var doc = System.Xml.Linq.XDocument.Parse(templateXml);
-            var root = doc.Root;
-            if (root is null) return templateXml;
-            root.SetAttributeValue("name", newName);
-            // Some library types use file_path or db_path instead of
-            // file_name_hint. Update whichever already exists; add
-            // file_name_hint as a default if none of the known names
-            // are present.
-            string[] pathAttrs = { "file_name_hint", "file_path", "db_path" };
-            bool updatedPath = false;
-            foreach (var attrName in pathAttrs)
-            {
-                if (root.Attribute(attrName) is not null)
-                {
-                    root.SetAttributeValue(attrName, newPath);
-                    updatedPath = true;
-                    break;
-                }
-            }
-            if (!updatedPath) root.SetAttributeValue("file_name_hint", newPath);
-            return root.ToString();
-        }
-        catch (System.Xml.XmlException)
-        {
-            return templateXml;
-        }
-    }
 
     [RelayCommand]
     private async Task LoadFromSkylineAsync()
