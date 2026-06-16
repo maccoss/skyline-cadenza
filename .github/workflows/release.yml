@@ -5,6 +5,13 @@ on:
     tags:
       - 'v*'
 
+# Opt the JavaScript-based actions into Node.js 24. As of 2026-06-16,
+# actions/setup-dotnet@v4 still ships against Node 20, which GitHub is
+# deprecating; setting this flag is the documented way to upgrade
+# without waiting for the upstream action to be republished.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-and-release:
     name: Build + Release

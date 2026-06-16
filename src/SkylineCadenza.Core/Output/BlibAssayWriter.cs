@@ -68,6 +68,13 @@ public static class BlibAssayWriter
         {
             DataSource = path,
             Mode = SqliteOpenMode.ReadWriteCreate,
+            // Microsoft.Data.Sqlite pools connections by default, which
+            // keeps the underlying file handle open on Windows even
+            // after `using` disposes the SqliteConnection. That breaks
+            // callers (and tests) that delete or move the file
+            // immediately after a write. The BLIB writer is a
+            // one-shot operation, so pooling provides no benefit.
+            Pooling = false,
         }.ToString();
 
         using var conn = new SqliteConnection(connStr);

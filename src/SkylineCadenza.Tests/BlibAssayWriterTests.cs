@@ -130,7 +130,7 @@ public class BlibAssayWriterTests
             var result = BlibAssayWriter.Write(cands, schedule, path);
             Assert.Equal(BlibAssayWriter.PeaksPerSpectrum, result.FragmentsWritten);
 
-            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT numPeaks FROM RefSpectra";
@@ -163,7 +163,7 @@ public class BlibAssayWriterTests
             var result = BlibAssayWriter.Write(cands, schedule, path);
             Assert.Equal(2, result.ProteinsWritten);
 
-            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
             conn.Open();
             using var cmd = conn.CreateCommand();
 
@@ -194,7 +194,7 @@ public class BlibAssayWriterTests
         try
         {
             BlibAssayWriter.Write(cands, schedule, path);
-            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT position, mass FROM Modifications";
@@ -285,7 +285,7 @@ public class BlibAssayWriterTests
         try
         {
             BlibAssayWriter.Write(cands, schedule, path);
-            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
+            using var conn = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";

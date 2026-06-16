@@ -84,6 +84,10 @@ public static class BlibRetentionTimeReader
         {
             DataSource = blibPath,
             Mode = SqliteOpenMode.ReadOnly,
+            // Don't pool: see BlibAssayWriter for the rationale. The
+            // reader is a one-shot read of a BLIB; callers may delete
+            // the file (e.g. tests) immediately afterwards.
+            Pooling = false,
         }.ToString();
 
         using var conn = new SqliteConnection(connStr);
