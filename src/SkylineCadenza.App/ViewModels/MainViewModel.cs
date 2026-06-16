@@ -309,7 +309,11 @@ public partial class MainViewModel : ObservableObject
         string? tlistPath = null;
         try
         {
-            string assayName = $"Cadenza-{DateTime.UtcNow:yyyyMMdd-HHmmss}";
+            // Local time so the timestamp on the library name matches the
+            // user's wall clock. We don't need cross-machine sortability
+            // here - the assay name is per-push-unique on a single
+            // workstation, which a local timestamp already gives us.
+            string assayName = $"Cadenza-{DateTime.Now:yyyyMMdd-HHmmss}";
 
             // Require the Skyline document to be saved so the BLIB
             // lives next to the .sky file at a stable on-disk path.
