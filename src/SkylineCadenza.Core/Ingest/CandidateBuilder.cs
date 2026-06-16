@@ -19,7 +19,7 @@ public static class CandidateBuilder
     public static List<Candidate> Build(
         IEnumerable<DiannRow> rows,
         IReadOnlyDictionary<string, (string Group, string Type)> parsimony,
-        IReadOnlyDictionary<FragmentKey, double[]> fragmentsByKey)
+        IReadOnlyDictionary<FragmentKey, FragmentIon[]> fragmentsByKey)
     {
         var candidates = new List<Candidate>();
         foreach (var row in rows)
@@ -34,8 +34,10 @@ public static class CandidateBuilder
             // Otherwise fall back to DIA-NN's per-row Fr.N.Id fragments
             // (real measured m/z), which gives a useful interference check
             // without requiring the user to load Carafe.
-            if (!fragmentsByKey.TryGetValue(carafeKey, out var top4))
-                top4 = row.Top4Fragments;
+            FragmentIon[] fragments =
+                fragmentsByKey.TryGetValue(carafeKey, out var ions)
+                    ? ions
+                    : row.Fragments ?? Array.Empty<FragmentIon>();
 
             candidates.Add(new Candidate
             {
@@ -53,7 +55,8 @@ public static class CandidateBuilder
                 ProteinQValue = row.ProteinQValue,
                 ProteinGroup = assignment.Group,
                 PeptideType = assignment.Type,
-                Top4Fragments = top4 ?? Array.Empty<double>(),
+                Fragments = fragments,
+                Top4Fragments = Candidate.DeriveTopMz(fragments, 4),
                 Run = row.Run,
             });
         }
@@ -93,7 +96,8 @@ public static class CandidateBuilder
                 Proteotypic = p.ProteinAccessions.Length == 1 ? 1 : 0,
                 ProteinGroup = assignment.Group,
                 PeptideType = assignment.Type,
-                Top4Fragments = p.Top4Fragments,
+                Fragments = p.Fragments,
+                Top4Fragments = Candidate.DeriveTopMz(p.Fragments, 4),
                 Run = "Carafe (predicted)",
             });
         }

@@ -1,3 +1,5 @@
+using SkylineCadenza.Core.Scheduling;
+
 namespace SkylineCadenza.Core.Ingest;
 
 /// <summary>
@@ -29,10 +31,12 @@ public sealed class DiannRow
     public required double ProteinQValue { get; init; }
 
     /// <summary>
-    /// Top-4 fragment m/z values extracted from DIA-NN's per-row
-    /// <c>Fr.0.Id</c>..<c>Fr.11.Id</c> columns, ranked by <c>Fr.N.Quantity</c>
-    /// and sorted ascending. Used as a fallback fragment source when no
-    /// Carafe library is provided.
+    /// Up to <see cref="Candidate.FragmentLimit"/> fragment ions
+    /// (m/z + intensity + charge) extracted from DIA-NN's per-row
+    /// <c>Fr.0.Id</c>..<c>Fr.11.Id</c> columns and ranked by
+    /// <c>Fr.N.Quantity</c> intensity descending. The fragment IDs
+    /// encode charge as <c>&lt;ion&gt;^&lt;charge&gt;/&lt;mz&gt;</c>
+    /// (e.g. <c>y13^1/957.511230</c>).
     /// </summary>
-    public required double[] Top4Fragments { get; init; }
+    public required FragmentIon[] Fragments { get; init; }
 }

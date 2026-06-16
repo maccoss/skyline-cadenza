@@ -1,5 +1,7 @@
 #nullable enable
 
+using SkylineCadenza.Core.Scheduling;
+
 namespace SkylineCadenza.Core.Ingest;
 
 /// <summary>
@@ -32,7 +34,7 @@ namespace SkylineCadenza.Core.Ingest;
 /// </item>
 /// </list>
 /// </remarks>
-public sealed record FragmentEntry(double FragmentMz, double RelativeIntensity);
+public sealed record FragmentEntry(double FragmentMz, double RelativeIntensity, int FragmentCharge = 1);
 
 public static class CarafeTsvReader
 {
@@ -40,6 +42,7 @@ public static class CarafeTsvReader
     private const string PrecursorChargeCol = "PrecursorCharge";
     private const string FragmentMzCol = "FragmentMz";
     private const string RelativeIntensityCol = "RelativeIntensity";
+    private const string FragmentChargeCol = "FragmentCharge";
 
     /// <summary>
     /// Reports progress through the file every <c>~1%</c> of bytes consumed.
@@ -59,10 +62,11 @@ public static class CarafeTsvReader
     /// <paramref name="allowedKeys"/>.
     /// </summary>
     /// <remarks>
-    /// Returned fragment arrays are <b>sorted by m/z ascending</b>, ready to
-    /// hand to <see cref="Scheduling.FragmentClash.AnyWithin"/>.
+    /// Returned fragment arrays are <b>sorted by intensity descending</b>,
+    /// so downstream consumers can derive both top-4 (scheduler clash
+    /// check) and top-6 (BLIB writer) without re-sorting.
     /// </remarks>
-    public static Dictionary<FragmentKey, double[]> ExtractTopFragments(
+    public static Dictionary<FragmentKey, FragmentIon[]> ExtractTopFragments(
         string tsvPath,
         HashSet<string> allowedKeys,
         int topN,
@@ -85,7 +89,10 @@ public static class CarafeTsvReader
         int idxCharge = IndexOf(headers, PrecursorChargeCol);
         int idxMz = IndexOf(headers, FragmentMzCol);
         int idxIntensity = IndexOf(headers, RelativeIntensityCol);
-        int maxIdx = Math.Max(Math.Max(idxPep, idxCharge), Math.Max(idxMz, idxIntensity));
+        int idxFragCharge = IndexOfOptional(headers, FragmentChargeCol);
+        int maxIdx = Math.Max(
+            Math.Max(Math.Max(idxPep, idxCharge), Math.Max(idxMz, idxIntensity)),
+            idxFragCharge);
 
         var perKey = new Dictionary<FragmentKey, List<FragmentEntry>>(allowedKeys.Count);
         long rowsScanned = 0, rowsKept = 0;
@@ -114,6 +121,16 @@ public static class CarafeTsvReader
                 System.Globalization.CultureInfo.InvariantCulture, out double mz)) continue;
             if (!double.TryParse(fields[idxIntensity], System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out double intensity)) continue;
+            int fragCharge = 1;
+            if (idxFragCharge >= 0
+                && idxFragCharge < fields.Length
+                && int.TryParse(fields[idxFragCharge],
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int parsedFragZ) && parsedFragZ > 0)
+            {
+                fragCharge = parsedFragZ;
+            }
 
             var key = new FragmentKey(pep, charge);
             if (!perKey.TryGetValue(key, out var list))
@@ -121,7 +138,7 @@ public static class CarafeTsvReader
                 list = new List<FragmentEntry>(12);
                 perKey[key] = list;
             }
-            list.Add(new FragmentEntry(mz, intensity));
+            list.Add(new FragmentEntry(mz, intensity, fragCharge));
             rowsKept++;
 
             if (progress != null && fs.Position >= nextReportAt)
@@ -145,18 +162,22 @@ public static class CarafeTsvReader
             RowsKept = rowsKept,
         });
 
-        // Reduce each (peptide, charge) bucket to its top-N fragments by
-        // intensity, then return their m/z values sorted ascending so they
-        // can feed directly into the fragment-clash two-pointer check.
-        var result = new Dictionary<FragmentKey, double[]>(perKey.Count);
+        // Reduce each (peptide, charge) bucket to its top-N fragments
+        // by intensity, intensity-sorted descending so downstream
+        // consumers (scheduler top-4, BLIB writer top-6) can take the
+        // prefix they need.
+        var result = new Dictionary<FragmentKey, FragmentIon[]>(perKey.Count);
         foreach (var (key, entries) in perKey)
         {
             entries.Sort(static (x, y) => y.RelativeIntensity.CompareTo(x.RelativeIntensity));
             int take = Math.Min(topN, entries.Count);
-            var mzs = new double[take];
-            for (int i = 0; i < take; i++) mzs[i] = entries[i].FragmentMz;
-            Array.Sort(mzs);
-            result[key] = mzs;
+            var ions = new FragmentIon[take];
+            for (int i = 0; i < take; i++)
+                ions[i] = new FragmentIon(
+                    entries[i].FragmentMz,
+                    entries[i].RelativeIntensity,
+                    entries[i].FragmentCharge);
+            result[key] = ions;
         }
         return result;
     }
@@ -167,5 +188,12 @@ public static class CarafeTsvReader
             if (headers[i] == name) return i;
         throw new InvalidDataException(
             $"Carafe TSV is missing required column '{name}'. Found: {string.Join(", ", headers)}");
+    }
+
+    private static int IndexOfOptional(string[] headers, string name)
+    {
+        for (int i = 0; i < headers.Length; i++)
+            if (headers[i] == name) return i;
+        return -1;
     }
 }

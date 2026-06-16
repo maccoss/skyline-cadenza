@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Parquet;
 using Parquet.Schema;
+using SkylineCadenza.Core.Scheduling;
 
 namespace SkylineCadenza.Core.Ingest;
 
@@ -44,11 +45,14 @@ public static class Top4Cache
     }
 
     /// <summary>
-    /// Reads a top-4 parquet (as produced by the Python notebook or our own
-    /// <see cref="SaveAsync"/>) into the <c>(peptide, charge) -&gt; sorted-mz</c>
-    /// shape the scheduler expects.
+    /// Reads a top-N parquet (as produced by <see cref="SaveAsync"/>) into
+    /// the <c>(peptide, charge) -&gt; FragmentIon[]</c> shape downstream
+    /// consumers expect. The parquet must carry <c>FragmentIntensity</c>
+    /// and <c>FragmentCharge</c> columns alongside <c>FragmentMz</c>;
+    /// older single-column caches written before the FragmentIon model
+    /// will fail to load and need to be regenerated.
     /// </summary>
-    public static async Task<Dictionary<FragmentKey, double[]>> LoadAsync(
+    public static async Task<Dictionary<FragmentKey, FragmentIon[]>> LoadAsync(
         string parquetPath, CancellationToken cancellationToken = default)
     {
         using var stream = File.OpenRead(parquetPath);
@@ -58,46 +62,52 @@ public static class Top4Cache
         var fPep = GetField(schema, "ModifiedPeptide");
         var fCharge = GetField(schema, "PrecursorCharge");
         var fMz = GetField(schema, "FragmentMz");
+        var fIntensity = GetField(schema, "FragmentIntensity");
+        var fFragCharge = GetField(schema, "FragmentCharge");
 
-        var perKey = new Dictionary<FragmentKey, List<double>>();
+        var perKey = new Dictionary<FragmentKey, List<FragmentIon>>();
         for (int g = 0; g < reader.RowGroupCount; g++)
         {
             using var rg = reader.OpenRowGroupReader(g);
             var pep = (string[])(await rg.ReadColumnAsync(fPep, cancellationToken)).Data;
             var charge = ReadLongArray(await rg.ReadColumnAsync(fCharge, cancellationToken));
             var mz = ReadDoubleArray(await rg.ReadColumnAsync(fMz, cancellationToken));
+            var intensity = ReadDoubleArray(await rg.ReadColumnAsync(fIntensity, cancellationToken));
+            var fragCharge = ReadLongArray(await rg.ReadColumnAsync(fFragCharge, cancellationToken));
 
             for (int i = 0; i < pep.Length; i++)
             {
                 var key = new FragmentKey(pep[i], (int)charge[i]);
                 if (!perKey.TryGetValue(key, out var list))
                 {
-                    list = new List<double>(4);
+                    list = new List<FragmentIon>(Candidate.FragmentLimit);
                     perKey[key] = list;
                 }
-                list.Add(mz[i]);
+                list.Add(new FragmentIon(mz[i], intensity[i], (int)fragCharge[i]));
             }
         }
 
-        var result = new Dictionary<FragmentKey, double[]>(perKey.Count);
+        var result = new Dictionary<FragmentKey, FragmentIon[]>(perKey.Count);
         foreach (var (key, vals) in perKey)
         {
-            var arr = vals.ToArray();
-            Array.Sort(arr);
-            result[key] = arr;
+            // Sort by intensity descending so downstream consumers can
+            // take the prefix they need (top-4 for clash, top-6 for write).
+            vals.Sort(static (a, b) => b.Intensity.CompareTo(a.Intensity));
+            result[key] = vals.ToArray();
         }
         return result;
     }
 
     /// <summary>
-    /// Writes a long-format parquet (<c>ModifiedPeptide</c>,
-    /// <c>PrecursorCharge</c>, <c>FragmentMz</c>) for the given fragment map.
-    /// Row order is grouped by <c>(peptide, charge)</c> so consumers can
-    /// rebuild the map without a final sort.
+    /// Writes a long-format parquet for the given fragment map. Columns:
+    /// <c>ModifiedPeptide</c>, <c>PrecursorCharge</c>, <c>FragmentMz</c>,
+    /// <c>FragmentIntensity</c>, <c>FragmentCharge</c>. Row order is
+    /// grouped by <c>(peptide, charge)</c> in the input dictionary's
+    /// enumeration order.
     /// </summary>
     public static async Task SaveAsync(
         string parquetPath,
-        IReadOnlyDictionary<FragmentKey, double[]> fragments,
+        IReadOnlyDictionary<FragmentKey, FragmentIon[]> fragments,
         CancellationToken cancellationToken = default)
     {
         int totalRows = 0;
@@ -106,14 +116,18 @@ public static class Top4Cache
         var peps = new string[totalRows];
         var charges = new int[totalRows];
         var mzs = new double[totalRows];
+        var intensities = new double[totalRows];
+        var fragCharges = new int[totalRows];
         int idx = 0;
         foreach (var (key, arr) in fragments)
         {
-            foreach (var mz in arr)
+            foreach (var ion in arr)
             {
                 peps[idx] = key.ModifiedPeptide;
                 charges[idx] = key.PrecursorCharge;
-                mzs[idx] = mz;
+                mzs[idx] = ion.Mz;
+                intensities[idx] = ion.Intensity;
+                fragCharges[idx] = ion.Charge;
                 idx++;
             }
         }
@@ -121,7 +135,9 @@ public static class Top4Cache
         var fPep = new DataField<string>("ModifiedPeptide");
         var fCharge = new DataField<int>("PrecursorCharge");
         var fMz = new DataField<double>("FragmentMz");
-        var schema = new ParquetSchema(fPep, fCharge, fMz);
+        var fIntensity = new DataField<double>("FragmentIntensity");
+        var fFragCharge = new DataField<int>("FragmentCharge");
+        var schema = new ParquetSchema(fPep, fCharge, fMz, fIntensity, fFragCharge);
 
         Directory.CreateDirectory(Path.GetDirectoryName(parquetPath)!);
         using var stream = File.Create(parquetPath);
@@ -130,6 +146,8 @@ public static class Top4Cache
         await rg.WriteColumnAsync(new Parquet.Data.DataColumn(fPep, peps), cancellationToken);
         await rg.WriteColumnAsync(new Parquet.Data.DataColumn(fCharge, charges), cancellationToken);
         await rg.WriteColumnAsync(new Parquet.Data.DataColumn(fMz, mzs), cancellationToken);
+        await rg.WriteColumnAsync(new Parquet.Data.DataColumn(fIntensity, intensities), cancellationToken);
+        await rg.WriteColumnAsync(new Parquet.Data.DataColumn(fFragCharge, fragCharges), cancellationToken);
     }
 
     private static DataField GetField(ParquetSchema schema, string name)

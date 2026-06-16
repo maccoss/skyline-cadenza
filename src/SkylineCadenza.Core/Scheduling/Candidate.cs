@@ -48,11 +48,48 @@ public sealed class Candidate
     public required string PeptideType { get; init; }
 
     /// <summary>
-    /// Top-4 predicted fragment m/z values sorted ascending. May be empty for
-    /// precursors with no library entry - those become solo-slot only.
+    /// Full predicted-fragment record kept on the candidate: up to
+    /// <c>FragmentLimit</c> entries (intensity descending), with the m/z
+    /// values, library intensities, and per-fragment charges from the
+    /// originating ingest path. Used to write a BLIB at assay-push time
+    /// and to derive <see cref="Top4Fragments"/> for the scheduler's
+    /// fragment-clash check. May be empty for precursors with no library
+    /// entry.
+    /// </summary>
+    public required FragmentIon[] Fragments { get; init; }
+
+    /// <summary>
+    /// Top-4 predicted fragment m/z values (sorted ascending) used by
+    /// the scheduler's fragment-clash check. Set by the ingest path as
+    /// the top-4 entries from <see cref="Fragments"/> by intensity,
+    /// projected to m/z and re-sorted by m/z. Cached because the
+    /// scheduler reads this in its inner loop.
     /// </summary>
     public required double[] Top4Fragments { get; init; }
 
     /// <summary>DIA-NN <c>Run</c> name. Used to split per-run / per-GPF views.</summary>
     public required string Run { get; init; }
+
+    /// <summary>
+    /// Number of fragments Cadenza keeps per precursor. Set wide enough
+    /// to back both the top-4 clash check and the top-6 written into the
+    /// assay BLIB without needing to re-ingest when the BLIB writer's
+    /// width changes.
+    /// </summary>
+    public const int FragmentLimit = 12;
+
+    /// <summary>
+    /// Project the top-k entries of <paramref name="fragments"/> (already
+    /// intensity-sorted descending) onto a sorted-ascending m/z array,
+    /// matching <see cref="Top4Fragments"/>'s contract.
+    /// </summary>
+    public static double[] DeriveTopMz(IReadOnlyList<FragmentIon> fragments, int k = 4)
+    {
+        int take = Math.Min(k, fragments.Count);
+        if (take == 0) return Array.Empty<double>();
+        var mz = new double[take];
+        for (int i = 0; i < take; i++) mz[i] = fragments[i].Mz;
+        Array.Sort(mz);
+        return mz;
+    }
 }

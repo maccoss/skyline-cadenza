@@ -110,6 +110,7 @@ public static class SkylineLibraryLoader
                 "PrecursorCharge",
                 "PrecursorMz",
                 "ProductMz",
+                "ProductCharge",
                 "LibraryIntensity",
                 rtColumn,
             },
@@ -243,6 +244,20 @@ public static class SkylineLibraryLoader
                     double.TryParse(Cell(fields, colIdx, "LibraryIntensity"),
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out double libInt);
+                    // ProductCharge may be missing from older Skyline
+                    // versions or for libraries that don't carry it.
+                    // Default to 1; the BLIB writer surfaces the actual
+                    // charge so a wrong default here only affects the
+                    // legacy transition-list path.
+                    int prodCharge = 1;
+                    if (colIdx.TryGetValue("ProductCharge", out int prodChargeIdx)
+                        && int.TryParse(fields[prodChargeIdx],
+                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out int parsedProdCharge) && parsedProdCharge > 0)
+                    {
+                        prodCharge = parsedProdCharge;
+                    }
                     double.TryParse(Cell(fields, colIdx, rtColumn),
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out double rt);
@@ -260,7 +275,7 @@ public static class SkylineLibraryLoader
                         };
                         buckets[key] = acc;
                     }
-                    acc.Fragments.Add((prodMz, libInt));
+                    acc.Fragments.Add((prodMz, libInt, prodCharge));
                 }
                 catch { /* skip malformed */ }
             }
@@ -307,12 +322,14 @@ public static class SkylineLibraryLoader
             if (!parsimony.TryGetValue(stripped, out var assignment)) continue;
 
             acc.Fragments.Sort(static (a, b) => b.intensity.CompareTo(a.intensity));
-            int take = Math.Min(4, acc.Fragments.Count);
-            var top4 = new double[take];
-            for (int i = 0; i < take; i++) top4[i] = acc.Fragments[i].mz;
-            Array.Sort(top4);
+            int take = Math.Min(Candidate.FragmentLimit, acc.Fragments.Count);
+            var ions = new FragmentIon[take];
+            for (int i = 0; i < take; i++)
+                ions[i] = new FragmentIon(
+                    acc.Fragments[i].mz, acc.Fragments[i].intensity, acc.Fragments[i].charge);
 
-            double summedIntensity = acc.Fragments.Take(take).Sum(f => f.intensity);
+            double summedIntensity = 0;
+            for (int i = 0; i < Math.Min(4, take); i++) summedIntensity += ions[i].Intensity;
 
             // BLIB-first firing window. The lookup key is the same
             // (modified sequence, charge) tuple Skyline returned in the
@@ -350,7 +367,8 @@ public static class SkylineLibraryLoader
                 Proteotypic = pepToProts[stripped].Count == 1 ? 1 : 0,
                 ProteinGroup = assignment.Group,
                 PeptideType = assignment.Type,
-                Top4Fragments = top4,
+                Fragments = ions,
+                Top4Fragments = Candidate.DeriveTopMz(ions, 4),
                 Run = "Skyline document",
             });
         }
@@ -510,6 +528,6 @@ public static class SkylineLibraryLoader
         public required int PrecursorCharge { get; init; }
         public required double PrecursorMz { get; init; }
         public required double Rt { get; init; }
-        public List<(double mz, double intensity)> Fragments { get; } = new(12);
+        public List<(double mz, double intensity, int charge)> Fragments { get; } = new(12);
     }
 }

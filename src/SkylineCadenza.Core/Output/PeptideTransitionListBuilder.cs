@@ -2,31 +2,36 @@ using System.Globalization;
 using System.Text;
 using SkylineCadenza.Core.Scheduling;
 
-namespace SkylineCadenza.Core.SkylineRpc;
+namespace SkylineCadenza.Core.Output;
 
 /// <summary>
 /// Writes a peptide-style transition list CSV in the column layout
 /// Skyline's <c>--import-transition-list=</c> expects for proteomics
-/// documents. Emit one row per (scheduled precursor, top-4 fragment).
+/// documents. Used by the push-to-Skyline flow to populate the target
+/// tree after the assay BLIB has been written via
+/// <see cref="BlibAssayWriter"/> and registered as a peptide-settings
+/// library; the BLIB carries spectra and per-replicate RT boundaries
+/// for chromatogram extraction, and this transition list tells Skyline
+/// exactly which (peptide, charge, fragment) triples to display in the
+/// document tree.
 /// </summary>
 /// <remarks>
-/// <para>
-/// The previous transition list builder used the small-molecule column
-/// set (MoleculeGroup, PrecursorName, ...), which Skyline routes into the
-/// small-molecule node of the document. For a proteomics document, those
-/// entries land in a hidden tree the user never sees. This builder
-/// emits the proteomic-side column names so Skyline puts the imported
-/// peptides in the protein/peptide tree.
-/// </para>
-/// <para>
-/// The DIA-NN style modification syntax <c>C(UniMod:4)</c> and the
-/// Carafe style <c>_C[UniMod:4]DIVIEK_</c> are both normalised to
-/// Skyline's preferred form <c>C[UniMod:4]DIVIEK</c> (square brackets,
-/// no flanking underscores).
-/// </para>
+/// The builder emits one row per (scheduled precursor, top-N library
+/// fragment). Each fragment row carries its real <c>Product Charge</c>
+/// from <see cref="FragmentIon.Charge"/> - earlier versions hardcoded
+/// <c>Product Charge = 1</c>, which produced "no matching product ion"
+/// errors when DIA-NN-picked fragments were actually +2 (common for
+/// longer tryptic peptides).
+///
+/// Modification syntax is normalised to Skyline's preferred
+/// <c>C[UniMod:4]</c> / <c>C[+57.0]</c> form: brackets only, no
+/// flanking underscores, no parentheses.
 /// </remarks>
 public static class PeptideTransitionListBuilder
 {
+    /// <summary>Number of fragment rows emitted per peptide.</summary>
+    public const int FragmentsPerPeptide = BlibAssayWriter.PeaksPerSpectrum;
+
     public static string Build(
         IReadOnlyList<Candidate> candidates,
         ScheduleResult schedule)
@@ -58,7 +63,7 @@ public static class PeptideTransitionListBuilder
             string protein = c.ProteinGroup;
             string peptide = NormalizeModifiedSequence(c.ModifiedSequence);
 
-            if (c.Top4Fragments.Length == 0)
+            if (c.Fragments.Length == 0)
             {
                 AppendRow(sb, inv, protein, peptide, c.PrecursorCharge,
                     c.PrecursorMz, productMz: null, productCharge: null,
@@ -66,10 +71,14 @@ public static class PeptideTransitionListBuilder
                 continue;
             }
 
-            foreach (var fragMz in c.Top4Fragments)
+            int take = Math.Min(FragmentsPerPeptide, c.Fragments.Length);
+            for (int k = 0; k < take; k++)
             {
+                var frag = c.Fragments[k];
                 AppendRow(sb, inv, protein, peptide, c.PrecursorCharge,
-                    c.PrecursorMz, fragMz, productCharge: 1,
+                    c.PrecursorMz,
+                    productMz: frag.Mz,
+                    productCharge: frag.Charge,
                     c.RtApex, windowMin, note);
             }
         }

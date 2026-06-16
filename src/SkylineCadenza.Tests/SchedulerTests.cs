@@ -14,6 +14,13 @@ public class SchedulerTests
         double quantity = 1e6,
         double[]? fragments = null)
     {
+        // Synthesise FragmentIon entries from the supplied mz array.
+        // Intensities are assigned descending so the input order matches
+        // the "top-4 by intensity" derivation, and charge defaults to 1.
+        var mzList = fragments ?? new[] { 100.0, 200.0, 300.0, 400.0 };
+        var ions = new FragmentIon[mzList.Length];
+        for (int i = 0; i < mzList.Length; i++)
+            ions[i] = new FragmentIon(mzList[i], mzList.Length - i, 1);
         return new Candidate
         {
             PrecursorId = id,
@@ -30,7 +37,8 @@ public class SchedulerTests
             Proteotypic = 1,
             ProteinGroup = group,
             PeptideType = "unique",
-            Top4Fragments = fragments ?? new[] { 100.0, 200.0, 300.0, 400.0 },
+            Fragments = ions,
+            Top4Fragments = Candidate.DeriveTopMz(ions, 4),
             Run = "test",
         };
     }

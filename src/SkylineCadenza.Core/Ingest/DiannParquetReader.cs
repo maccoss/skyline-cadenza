@@ -1,5 +1,6 @@
 using Parquet;
 using Parquet.Schema;
+using SkylineCadenza.Core.Scheduling;
 
 namespace SkylineCadenza.Core.Ingest;
 
@@ -41,7 +42,10 @@ public static class DiannParquetReader
     private const string Decoy = "Decoy";
     private const string PgQValue = "PG.Q.Value";
     private const int FragmentColumnCount = 12;
-    private const int TopFragmentsKept = 4;
+    // Keep up to the full DIA-NN column count so downstream consumers
+    // (scheduler top-4 clash check, BLIB writer top-6) can both pull
+    // from the same Candidate.Fragments without re-ingesting.
+    private const int TopFragmentsKept = Candidate.FragmentLimit;
 
     public static async Task<List<DiannRow>> LoadAsync(
         string parquetPath,
@@ -163,7 +167,7 @@ public static class DiannParquetReader
                     Run = run[i],
                     QValue = qValue[i],
                     ProteinQValue = pgQValue[i],
-                    Top4Fragments = ExtractTop4Fragments(fragIdCols, fragQtyCols, i),
+                    Fragments = ExtractTopFragments(fragIdCols, fragQtyCols, i),
                 };
             }
         }
@@ -200,17 +204,21 @@ public static class DiannParquetReader
 
     /// <summary>
     /// Parse the up-to-12 DIA-NN fragments for one row, keeping the top-N
-    /// by quantity and returning their m/z values sorted ascending.
+    /// by quantity and returning them as <see cref="FragmentIon"/>
+    /// records sorted by intensity descending.
     /// </summary>
     /// <remarks>
     /// Fragment ids are formatted <c>&lt;ion&gt;^&lt;charge&gt;/&lt;mz&gt;</c>
-    /// (e.g. <c>y13^1/957.511230</c>); the m/z is everything after the
-    /// final <c>/</c>. Empty or unparseable slots are dropped.
+    /// (e.g. <c>y13^1/957.511230</c>); the charge is between the caret
+    /// and slash, the m/z is everything after the final <c>/</c>. The
+    /// fragment quantity from the parallel <c>Fr.N.Quantity</c> column
+    /// is the intensity. Empty or unparseable slots are dropped.
     /// </remarks>
-    private static double[] ExtractTop4Fragments(string[][] ids, double[][] qtys, int rowIndex)
+    private static FragmentIon[] ExtractTopFragments(string[][] ids, double[][] qtys, int rowIndex)
     {
         Span<double> mzBuf = stackalloc double[FragmentColumnCount];
         Span<double> qBuf = stackalloc double[FragmentColumnCount];
+        Span<int> zBuf = stackalloc int[FragmentColumnCount];
         int n = 0;
         for (int k = 0; k < FragmentColumnCount; k++)
         {
@@ -225,11 +233,28 @@ public static class DiannParquetReader
                 out double mz)) continue;
             double qty = qtys.Length > k && qtys[k].Length > rowIndex ? qtys[k][rowIndex] : 0.0;
             if (qty <= 0) continue;
+
+            // Charge: the int between '^' and '/'. Default to 1 if absent
+            // or unparseable - safer than dropping the fragment.
+            int charge = 1;
+            int caret = id.IndexOf('^');
+            if (caret >= 0 && caret + 1 < slash)
+            {
+                if (int.TryParse(id.AsSpan(caret + 1, slash - caret - 1),
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int parsedZ) && parsedZ > 0)
+                {
+                    charge = parsedZ;
+                }
+            }
+
             mzBuf[n] = mz;
             qBuf[n] = qty;
+            zBuf[n] = charge;
             n++;
         }
-        if (n == 0) return Array.Empty<double>();
+        if (n == 0) return Array.Empty<FragmentIon>();
 
         // Selection sort the top-N by quantity descending - n <= 12 makes
         // this trivial and avoids allocating an index array.
@@ -243,11 +268,11 @@ public static class DiannParquetReader
             {
                 (mzBuf[i], mzBuf[best]) = (mzBuf[best], mzBuf[i]);
                 (qBuf[i], qBuf[best]) = (qBuf[best], qBuf[i]);
+                (zBuf[i], zBuf[best]) = (zBuf[best], zBuf[i]);
             }
         }
-        var top = new double[take];
-        for (int i = 0; i < take; i++) top[i] = mzBuf[i];
-        Array.Sort(top);
+        var top = new FragmentIon[take];
+        for (int i = 0; i < take; i++) top[i] = new FragmentIon(mzBuf[i], qBuf[i], zBuf[i]);
         return top;
     }
 

@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Win32;
 using SkylineCadenza.Core.Ingest;
+using SkylineCadenza.Core.Output;
 using SkylineCadenza.Core.Parsimony;
 using SkylineCadenza.Core.Scheduling;
 using SkylineCadenza.Core.SkylineRpc;
@@ -291,83 +292,135 @@ public partial class MainViewModel : ObservableObject
             StatusMessage = "Skyline: not connected. Launch this tool from Skyline's Tools menu.";
             return;
         }
-        // InsertSmallMoleculeTransitionList puts rows into the document's
-        // small-molecule subtree, which is invisible in a proteomics
-        // document. For peptide targets we write a peptide-style CSV to a
-        // temp file and call SkylineCmd --import-transition-list directly
-        // via RunCommand; that hits the same code path Skyline uses for
-        // the UI's Edit > Insert > Transition List flow and lands rows in
-        // the protein/peptide tree.
+
+        // Two-step push:
+        //   1. Write a self-contained BiblioSpec library (one reference
+        //      spectrum per peptide with top-6 library fragments + the
+        //      per-replicate RT firing window) and register it as a
+        //      peptide-settings library in the running document. Skyline
+        //      uses this BLIB for chromatogram extraction and as the
+        //      canonical RT / fragment-intensity record of the assay.
         //
-        // The Skyline-side import is single-threaded and rebuilds the
-        // document tree per protein - on a fully-loaded SEA-AD schedule
-        // (~4k proteins, ~30k transitions) this can take 30-60 minutes.
-        // We run it on a background thread so the Cadenza UI stays
-        // responsive, and start a periodic status updater so the user
-        // sees Cadenza isn't hung. Live import progress is in Skyline's
-        // Immediate Window (View > Other Windows > Immediate Window).
-        string? tempPath = null;
-        var pushStart = DateTimeOffset.UtcNow;
-        using var heartbeatCts = new CancellationTokenSource();
+        //   2. Push a peptide-style transition list so the document's
+        //      target tree is populated immediately. Fragment Product
+        //      Charge values come from FragmentIon.Charge directly, so
+        //      the +2 fragments that triggered "no matching product ion"
+        //      errors in the previous all-+1-hardcoded build are now
+        //      reported correctly.
+        string? blibPath = null;
+        string? tlistPath = null;
         try
         {
+            string assayName = $"Cadenza-{DateTime.UtcNow:yyyyMMdd-HHmmss}";
+            blibPath = await ChooseAssayBlibPathAsync(assayName);
+
+            // Step 1: BLIB write + library registration.
+            StatusMessage = $"Writing assay BLIB to {Path.GetFileName(blibPath)}...";
+            var writeResult = await Task.Run(() =>
+                BlibAssayWriter.Write(_candidates, ScheduleResult, blibPath!, assayName));
+
+            string libXml = BuildBibliospecLibraryXml(assayName, blibPath);
+            try
+            {
+                await Task.Run(() => _skylineSession.Execute(c =>
+                {
+                    c.AddSettingsListItem("Libraries", libXml, overwrite: true);
+                    return 0;
+                }));
+            }
+            catch (Exception ex)
+            {
+                StatusMessage = $"BLIB written to {blibPath} "
+                    + $"({writeResult.RefSpectraWritten:n0} peptides), "
+                    + $"but registering it with Skyline failed: {ex.Message}. "
+                    + "Add it manually via Settings > Peptide Settings > Library, "
+                    + "then re-run the push so the target tree populates.";
+                return;
+            }
+
+            // Step 1.5: compute the recommended peptide + transition
+            // filter settings for this assay and surface them so the
+            // user can verify Skyline is configured to receive every
+            // fragment the transition list is about to push. The JSON-
+            // RPC interface does not currently let us mutate the LIVE
+            // document's transition filter (SkylineCmd's --tran-*
+            // flags operate on saved files, not the in-memory doc),
+            // so this is advisory only - upstream Skyline change
+            // tracked as a known gap.
+            var scheduledCands = ScheduleResult.ScheduledIndices
+                .Select(i => _candidates[i])
+                .ToList();
+            var recommendation = SkylineSettingsConfigurator.Recommend(scheduledCands);
+            StatusMessage = $"BLIB registered: {writeResult.RefSpectraWritten:n0} peptides. "
+                + "Verify Skyline transition filter: " + recommendation.ToStatusLine()
+                + " Pushing transition list...";
+
+            // Step 2: transition-list import. Each row carries the real
+            // FragmentIon.Charge so Skyline's product-ion match succeeds
+            // even for the +2 y/b fragments DIA-NN selects on longer
+            // tryptic peptides.
             var csv = PeptideTransitionListBuilder.Build(_candidates, ScheduleResult);
             int rowCount = csv.AsSpan().Count('\n') - 1;
-            tempPath = Path.Combine(Path.GetTempPath(),
+            tlistPath = Path.Combine(Path.GetTempPath(),
                 $"cadenza-targets-{Guid.NewGuid():N}.csv");
-            await File.WriteAllTextAsync(tempPath, csv);
+            await File.WriteAllTextAsync(tlistPath, csv);
 
-            // Observed rate on SEA-AD: roughly 10 transition rows / sec
-            // through Skyline's MassListImporter. Used as a rough ETA.
+            var pushStart = DateTimeOffset.UtcNow;
             const double rowsPerSec = 10.0;
             double etaMin = rowCount / rowsPerSec / 60.0;
             string etaText = etaMin < 1.0
                 ? $"~{rowCount / rowsPerSec:0} s"
                 : $"~{etaMin:0.0} min";
+            StatusMessage = $"BLIB registered. Importing transition list: "
+                + $"{ScheduleResult.ScheduledIndices.Length:n0} precursors "
+                + $"({rowCount:n0} rows). ETA {etaText}. "
+                + "Live progress in Skyline's Immediate Window.";
 
-            StatusMessage =
-                $"Pushing {ScheduleResult.ScheduledIndices.Length:n0} precursors "
-                + $"({rowCount:n0} transition rows) to Skyline. ETA {etaText}. "
-                + "Live progress is in Skyline's Immediate Window.";
-
-            // Heartbeat task updates the status with elapsed time every
-            // 10 s while the import runs so the user can tell Cadenza is
-            // still alive even though the RunCommand call is opaque.
+            using var heartbeatCts = new CancellationTokenSource();
             var heartbeat = HeartbeatStatus(pushStart, rowCount, rowsPerSec, heartbeatCts.Token);
-
-            string output = await Task.Run(() => _skylineSession.Execute(c => c.RunCommand(new[]
+            string tlistOutput = string.Empty;
+            try
             {
-                "--import-transition-list=" + tempPath,
-            })));
+                tlistOutput = await Task.Run(() => _skylineSession.Execute(c => c.RunCommand(new[]
+                {
+                    "--import-transition-list=" + tlistPath,
+                })));
+            }
+            finally
+            {
+                heartbeatCts.Cancel();
+                try { await heartbeat; } catch (OperationCanceledException) { }
+            }
 
-            heartbeatCts.Cancel();
-            try { await heartbeat; } catch (OperationCanceledException) { }
-
-            string head = string.IsNullOrWhiteSpace(output)
+            string head = string.IsNullOrWhiteSpace(tlistOutput)
                 ? "(no output)"
-                : output.Length > 400 ? output.Substring(0, 400) + "..." : output;
+                : tlistOutput.Length > 400 ? tlistOutput.Substring(0, 400) + "..." : tlistOutput;
             var elapsed = DateTimeOffset.UtcNow - pushStart;
-            StatusMessage = $"Pushed {ScheduleResult.ScheduledIndices.Length:n0} precursors "
-                + $"({rowCount:n0} rows) in {elapsed.TotalMinutes:0.0} min. Skyline: {head}";
+            StatusMessage = $"Pushed '{assayName}': "
+                + $"BLIB at {Path.GetFileName(blibPath)} ({writeResult.RefSpectraWritten:n0} peptides) + "
+                + $"transition list ({rowCount:n0} rows in {elapsed.TotalMinutes:0.0} min). "
+                + $"Skyline: {head}. "
+                + "If transitions are missing, verify Settings > Transition Settings > Filter "
+                + $"matches: {recommendation.ToStatusLine()}";
         }
         catch (Exception ex)
         {
-            StatusMessage = $"Skyline import failed ({ex.GetType().Name}): {ex.Message}";
+            StatusMessage = $"Skyline push failed ({ex.GetType().Name}): {ex.Message}";
         }
         finally
         {
-            heartbeatCts.Cancel();
-            if (tempPath is not null)
+            if (tlistPath is not null)
             {
-                try { File.Delete(tempPath); } catch { /* best effort */ }
+                try { File.Delete(tlistPath); } catch { /* best effort */ }
             }
         }
     }
 
     /// <summary>
     /// Updates <see cref="StatusMessage"/> every 10 s while a long Skyline
-    /// import is in flight. Lets the user see progress relative to the ETA
-    /// even though <c>RunCommand</c> returns only on completion.
+    /// transition-list import is in flight, so the user sees Cadenza is
+    /// still alive while <c>RunCommand</c> blocks on the underlying
+    /// <c>MassListImporter</c>.
     /// </summary>
     private async Task HeartbeatStatus(DateTimeOffset start, int rowCount, double rowsPerSec, CancellationToken ct)
     {
@@ -379,12 +432,45 @@ public partial class MainViewModel : ObservableObject
                 var elapsed = DateTimeOffset.UtcNow - start;
                 double pctEst = Math.Min(99, elapsed.TotalSeconds * rowsPerSec / Math.Max(1, rowCount) * 100);
                 StatusMessage =
-                    $"Skyline import in flight: elapsed {elapsed.TotalMinutes:0.0} min, "
+                    $"Skyline transition-list import in flight: elapsed {elapsed.TotalMinutes:0.0} min, "
                     + $"estimated {pctEst:0}% of {rowCount:n0} rows. "
                     + "Live per-protein progress in Skyline's Immediate Window.";
             }
         }
         catch (OperationCanceledException) { }
+    }
+
+    /// <summary>
+    /// Decide where to drop the assay BLIB. Defaults next to the active
+    /// Skyline document so the library survives session restarts; falls
+    /// back to <c>%TEMP%</c> when the document path isn't known yet.
+    /// </summary>
+    private async Task<string> ChooseAssayBlibPathAsync(string assayName)
+    {
+        string? docPath = null;
+        try
+        {
+            docPath = await Task.Run(() => _skylineSession!.Execute(c => c.GetDocumentPath()));
+        }
+        catch { /* best effort */ }
+
+        string dir = !string.IsNullOrEmpty(docPath)
+            ? Path.GetDirectoryName(docPath!) ?? Path.GetTempPath()
+            : Path.GetTempPath();
+        return Path.Combine(dir, assayName + ".blib");
+    }
+
+    /// <summary>
+    /// Skyline library XML for a BiblioSpec-Lite library. Skyline reads
+    /// the library file from <c>file_name_hint</c> at attach time.
+    /// </summary>
+    private static string BuildBibliospecLibraryXml(string name, string filePath)
+    {
+        // Escape XML attributes - paths can contain & or ' on some
+        // platforms. SecurityElement.Escape covers the common cases.
+        string escName = System.Security.SecurityElement.Escape(name);
+        string escPath = System.Security.SecurityElement.Escape(filePath);
+        return $"<bibliospec_lite_library name=\"{escName}\" file_name_hint=\"{escPath}\" />";
     }
 
     [RelayCommand]
@@ -435,7 +521,7 @@ public partial class MainViewModel : ObservableObject
             LibraryPrecursors = _candidates.Count;
             LibraryPeptides = _candidates.Select(c => c.StrippedSequence).Distinct().Count();
             LibraryProteinGroups = _knownAccessions.Count;
-            LibraryCarafeMatched = _candidates.Count(c => c.Top4Fragments.Length > 0);
+            LibraryCarafeMatched = _candidates.Count(c => c.Fragments.Length > 0);
 
             LibraryLoaded?.Invoke();
             string rtSource;
@@ -656,12 +742,13 @@ public partial class MainViewModel : ObservableObject
         _geneToAccession = ProteinListParser.BuildGeneToAccession(rows);
         _knownAccessions = parsimony.Values.Select(v => v.Group).ToHashSet();
 
-        var frags = new Dictionary<FragmentKey, double[]>();
+        var frags = new Dictionary<FragmentKey, FragmentIon[]>();
         if (!string.IsNullOrEmpty(CarafeTsvPath) && File.Exists(CarafeTsvPath))
         {
             StatusMessage = $"Streaming Carafe library {Path.GetFileName(CarafeTsvPath)}...";
             var allowed = new HashSet<string>(rows.Select(r => CarafeKey.FromDiann(r.ModifiedSequence)));
-            frags = await Task.Run(() => CarafeTsvReader.ExtractTopFragments(CarafeTsvPath!, allowed, 4));
+            frags = await Task.Run(() => CarafeTsvReader.ExtractTopFragments(
+                CarafeTsvPath!, allowed, Candidate.FragmentLimit));
         }
 
         _candidates = CandidateBuilder.Build(rows, parsimony, frags);
@@ -713,7 +800,7 @@ public partial class MainViewModel : ObservableObject
         LibraryPrecursors = _candidates.Count;
         LibraryPeptides = _candidates.Select(c => c.StrippedSequence).Distinct().Count();
         LibraryProteinGroups = _knownAccessions?.Count ?? 0;
-        LibraryCarafeMatched = _candidates.Count(c => c.Top4Fragments.Length > 0);
+        LibraryCarafeMatched = _candidates.Count(c => c.Fragments.Length > 0);
 
         LibraryLoaded?.Invoke();
         StatusMessage = $"Source: {sourceLabel}. Loaded {LibraryPrecursors:n0} precursors / {LibraryPeptides:n0} peptides / {LibraryProteinGroups:n0} groups. Fragments: {fragSourceLabel}.";

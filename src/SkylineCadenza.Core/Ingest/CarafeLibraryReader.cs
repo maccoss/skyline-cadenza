@@ -1,5 +1,7 @@
 #nullable enable
 
+using SkylineCadenza.Core.Scheduling;
+
 namespace SkylineCadenza.Core.Ingest;
 
 /// <summary>
@@ -27,8 +29,13 @@ public sealed class CarafePrecursor
     /// predicted-intensity proxy for the peptide-ranking knobs.
     /// </summary>
     public required double PredictedIntensity { get; init; }
-    /// <summary>Top-N fragment m/z values sorted ascending.</summary>
-    public required double[] Top4Fragments { get; init; }
+    /// <summary>
+    /// Up to <see cref="Candidate.FragmentLimit"/> fragment ions with
+    /// m/z + relative intensity + charge, intensity-sorted descending.
+    /// Charge defaults to 1 when the source TSV doesn't carry a
+    /// <c>FragmentCharge</c> column.
+    /// </summary>
+    public required FragmentIon[] Fragments { get; init; }
 }
 
 /// <summary>
@@ -53,11 +60,12 @@ public static class CarafeLibraryReader
     private const string Cols_Decoy = "Decoy";
     private const string Cols_FragmentMz = "FragmentMz";
     private const string Cols_RelativeIntensity = "RelativeIntensity";
+    private const string Cols_FragmentCharge = "FragmentCharge";
 
     public static List<CarafePrecursor> LoadCandidates(
         string tsvPath,
         IReadOnlySet<string> allowedAccessions,
-        int topN = 4,
+        int topN = Candidate.FragmentLimit,
         IProgress<CarafeTsvReader.Progress>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -83,8 +91,9 @@ public static class CarafeLibraryReader
         int idxDecoy = FindOptional(headers, Cols_Decoy);
         int idxFragMz = Find(headers, Cols_FragmentMz);
         int idxRelInt = Find(headers, Cols_RelativeIntensity);
+        int idxFragCharge = FindOptional(headers, Cols_FragmentCharge);
         int maxIdx = new[] { idxModPep, idxStripPep, idxMz, idxCharge, idxTr,
-            idxProtein, idxDecoy, idxFragMz, idxRelInt }.Max();
+            idxProtein, idxDecoy, idxFragMz, idxRelInt, idxFragCharge }.Max();
 
         // Per (modified peptide, charge): accumulating data while we walk
         // the TSV. We only need one set of precursor metadata per key.
@@ -146,7 +155,17 @@ public static class CarafeLibraryReader
                 System.Globalization.CultureInfo.InvariantCulture, out double fmz)) continue;
             if (!double.TryParse(fields[idxRelInt], System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out double rint)) continue;
-            acc1.Fragments.Add((fmz, rint));
+            int fragZ = 1;
+            if (idxFragCharge >= 0
+                && idxFragCharge < fields.Length
+                && int.TryParse(fields[idxFragCharge],
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int parsedZ) && parsedZ > 0)
+            {
+                fragZ = parsedZ;
+            }
+            acc1.Fragments.Add((fmz, rint, fragZ));
             rowsKept++;
 
             if (progress != null && fs.Position >= nextReportAt)
@@ -174,14 +193,14 @@ public static class CarafeLibraryReader
         {
             acc1.Fragments.Sort(static (a, b) => b.intensity.CompareTo(a.intensity));
             int take = Math.Min(topN, acc1.Fragments.Count);
-            var mzs = new double[take];
+            var ions = new FragmentIon[take];
             double predIntensity = 0;
             for (int i = 0; i < take; i++)
             {
-                mzs[i] = acc1.Fragments[i].mz;
-                predIntensity += acc1.Fragments[i].intensity;
+                var f = acc1.Fragments[i];
+                ions[i] = new FragmentIon(f.mz, f.intensity, f.charge);
+                predIntensity += f.intensity;
             }
-            Array.Sort(mzs);
             result.Add(new CarafePrecursor
             {
                 ModifiedPeptide = acc1.ModifiedPeptide,
@@ -192,7 +211,7 @@ public static class CarafeLibraryReader
                 ProteinIdRaw = acc1.ProteinIdRaw,
                 ProteinAccessions = acc1.Accessions,
                 PredictedIntensity = predIntensity,
-                Top4Fragments = mzs,
+                Fragments = ions,
             });
         }
         return result;
@@ -207,7 +226,7 @@ public static class CarafeLibraryReader
         public required double TrRecalibrated { get; init; }
         public required string ProteinIdRaw { get; init; }
         public required string[] Accessions { get; init; }
-        public List<(double mz, double intensity)> Fragments { get; } = new(12);
+        public List<(double mz, double intensity, int charge)> Fragments { get; } = new(12);
     }
 
     /// <summary>

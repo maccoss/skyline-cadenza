@@ -51,22 +51,23 @@ public class EndToEndPipelineTests
         // integration check, use synthetic fragments derived from the
         // precursor m/z so the scheduler runs end-to-end without depending
         // on the pyarrow-format cache.
-        var frags = new Dictionary<FragmentKey, double[]>();
+        var frags = new Dictionary<FragmentKey, FragmentIon[]>();
         foreach (var row in rows)
         {
             var key = new FragmentKey(
                 CarafeKey.FromDiann(row.ModifiedSequence),
                 row.PrecursorCharge);
-            // 4 synthetic fragments spread around the precursor m/z. The
-            // spacing is wide enough that two different precursors get
-            // different fragment families when their m/z differs.
+            // 4 synthetic fragments spread around the precursor m/z with
+            // descending synthetic intensities and charge 1. The spacing
+            // is wide enough that two different precursors get different
+            // fragment families when their m/z differs.
             double seed = row.PrecursorMz;
             frags[key] = new[]
             {
-                Math.Round(seed * 0.5 + 100.0, 4),
-                Math.Round(seed * 0.5 + 200.0, 4),
-                Math.Round(seed * 0.5 + 300.0, 4),
-                Math.Round(seed * 0.5 + 400.0, 4),
+                new FragmentIon(Math.Round(seed * 0.5 + 100.0, 4), 4.0, 1),
+                new FragmentIon(Math.Round(seed * 0.5 + 200.0, 4), 3.0, 1),
+                new FragmentIon(Math.Round(seed * 0.5 + 300.0, 4), 2.0, 1),
+                new FragmentIon(Math.Round(seed * 0.5 + 400.0, 4), 1.0, 1),
             };
         }
         _output.WriteLine($"Synthetic fragments: {frags.Count:n0} keys");
@@ -74,7 +75,7 @@ public class EndToEndPipelineTests
         var swCand = System.Diagnostics.Stopwatch.StartNew();
         var candidates = CandidateBuilder.Build(rows, parsimony, frags);
         swCand.Stop();
-        int withFrags = candidates.Count(c => c.Top4Fragments.Length > 0);
+        int withFrags = candidates.Count(c => c.Fragments.Length > 0);
         _output.WriteLine($"Candidates: {candidates.Count:n0} total, {withFrags:n0} with fragments (in {swCand.ElapsedMilliseconds} ms)");
         Assert.True(candidates.Count > 50_000);
 
