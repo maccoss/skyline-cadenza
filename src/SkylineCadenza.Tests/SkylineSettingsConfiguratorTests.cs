@@ -37,7 +37,7 @@ public class SkylineSettingsConfiguratorTests
             Make("PEPTWO", 3, new FragmentIon(200, 100, 1)),
             Make("PEPTHREE", 4, new FragmentIon(200, 100, 1)),
         };
-        var rec = SkylineSettingsConfigurator.Recommend(cands);
+        var rec = SkylineSettingsConfigurator.Recommend(cands, AcquisitionMode.Mtm);
         Assert.Equal(new[] { 2, 3, 4 }, rec.PrecursorIonCharges.ToArray());
     }
 
@@ -50,7 +50,7 @@ public class SkylineSettingsConfiguratorTests
                 new FragmentIon(200, 100, 1),
                 new FragmentIon(400, 80, 2)),
         };
-        var rec = SkylineSettingsConfigurator.Recommend(cands);
+        var rec = SkylineSettingsConfigurator.Recommend(cands, AcquisitionMode.Mtm);
         Assert.Equal(new[] { 1, 2 }, rec.ProductIonCharges.ToArray());
     }
 
@@ -58,7 +58,7 @@ public class SkylineSettingsConfiguratorTests
     public void Recommend_DefaultsToYbIonTypes()
     {
         var cands = new[] { Make("PEPTIDE", 2, new FragmentIon(200, 100, 1)) };
-        var rec = SkylineSettingsConfigurator.Recommend(cands);
+        var rec = SkylineSettingsConfigurator.Recommend(cands, AcquisitionMode.Mtm);
         Assert.Equal(new[] { "y", "b" }, rec.ProductIonTypes.ToArray());
     }
 
@@ -66,7 +66,7 @@ public class SkylineSettingsConfiguratorTests
     public void Recommend_LibraryPickTopN_MatchesBlibWriter()
     {
         var cands = new[] { Make("PEPTIDE", 2, new FragmentIon(200, 100, 1)) };
-        var rec = SkylineSettingsConfigurator.Recommend(cands);
+        var rec = SkylineSettingsConfigurator.Recommend(cands, AcquisitionMode.Mtm);
         Assert.Equal(Core.Output.BlibAssayWriter.PeaksPerSpectrum, rec.LibraryPickTopN);
     }
 
@@ -78,7 +78,7 @@ public class SkylineSettingsConfiguratorTests
             Make("SHORT", 2, new FragmentIon(200, 100, 1)),                       // length 5
             Make("THISISAREALLYLONGPEPTIDE", 2, new FragmentIon(200, 100, 1)),    // length 24
         };
-        var rec = SkylineSettingsConfigurator.Recommend(cands);
+        var rec = SkylineSettingsConfigurator.Recommend(cands, AcquisitionMode.Mtm);
         Assert.Equal(5, rec.PeptideMinLength);
         Assert.Equal(24, rec.PeptideMaxLength);
     }
@@ -86,7 +86,7 @@ public class SkylineSettingsConfiguratorTests
     [Fact]
     public void Recommend_EmptyAssay_FallsBackToSensibleDefaults()
     {
-        var rec = SkylineSettingsConfigurator.Recommend(Array.Empty<Candidate>());
+        var rec = SkylineSettingsConfigurator.Recommend(Array.Empty<Candidate>(), AcquisitionMode.Mtm);
         Assert.Contains(2, rec.PrecursorIonCharges);
         Assert.Contains(3, rec.PrecursorIonCharges);
         Assert.Contains(1, rec.ProductIonCharges);
@@ -101,7 +101,7 @@ public class SkylineSettingsConfiguratorTests
                 new FragmentIon(200, 100, 1),
                 new FragmentIon(400, 80, 2)),
         };
-        var line = SkylineSettingsConfigurator.Recommend(cands).ToStatusLine();
+        var line = SkylineSettingsConfigurator.Recommend(cands, AcquisitionMode.Mtm).ToStatusLine();
         Assert.Contains("precursor charges {2}", line);
         Assert.Contains("product charges {1,2}", line);
         Assert.Contains("y,b", line);

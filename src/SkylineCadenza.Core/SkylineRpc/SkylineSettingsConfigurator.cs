@@ -38,13 +38,15 @@ public static class SkylineSettingsConfigurator
         IReadOnlyList<string> ProductIonTypes,
         int LibraryPickTopN,
         int PeptideMinLength,
-        int PeptideMaxLength)
+        int PeptideMaxLength,
+        string FullScanAcquisitionMethod)
     {
         /// <summary>
         /// Short single-line description for the status bar.
         /// </summary>
         public string ToStatusLine() =>
-            $"precursor charges {{{string.Join(",", PrecursorIonCharges)}}}, "
+            $"acquisition method {FullScanAcquisitionMethod}, "
+            + $"precursor charges {{{string.Join(",", PrecursorIonCharges)}}}, "
             + $"product charges {{{string.Join(",", ProductIonCharges)}}}, "
             + $"ion types {{{string.Join(",", ProductIonTypes)}}}, "
             + $"library pick top {LibraryPickTopN}, "
@@ -59,6 +61,8 @@ public static class SkylineSettingsConfigurator
         {
             var sb = new StringBuilder();
             sb.AppendLine("Verify in Skyline (Settings menu):");
+            sb.AppendLine("  Transition Settings > Full-Scan:");
+            sb.AppendLine($"    Acquisition method: {FullScanAcquisitionMethod}");
             sb.AppendLine("  Transition Settings > Filter > Peptides:");
             sb.AppendLine($"    Precursor charges: {string.Join(", ", PrecursorIonCharges)}");
             sb.AppendLine($"    Ion charges:      {string.Join(", ", ProductIonCharges)}");
@@ -75,9 +79,16 @@ public static class SkylineSettingsConfigurator
     }
 
     /// <summary>
-    /// Compute the recommendation from the scheduled candidates.
+    /// Compute the recommendation from the scheduled candidates and the
+    /// acquisition mode the assay was scheduled under. PRM mode maps to
+    /// Skyline's <c>PRM</c> acquisition method; MTM maps to <c>DIA</c>
+    /// since MTM is multiplexed-targeted DIA from Skyline's perspective
+    /// (each MS/MS spectrum carries multiple co-isolated precursors,
+    /// which is what Skyline's DIA chromatogram extractor expects).
     /// </summary>
-    public static Recommendation Recommend(IReadOnlyList<Candidate> scheduledCandidates)
+    public static Recommendation Recommend(
+        IReadOnlyList<Candidate> scheduledCandidates,
+        AcquisitionMode mode)
     {
         var precursorCharges = scheduledCandidates
             .Select(c => c.PrecursorCharge)
@@ -102,13 +113,16 @@ public static class SkylineSettingsConfigurator
         int minLen = lengths.Count == 0 ? 6 : Math.Max(4, lengths.Min());
         int maxLen = lengths.Count == 0 ? 30 : Math.Min(60, lengths.Max());
 
+        string acquisitionMethod = mode == AcquisitionMode.Prm ? "PRM" : "DIA";
+
         return new Recommendation(
             PrecursorIonCharges: precursorCharges,
             ProductIonCharges: fragmentCharges,
             ProductIonTypes: new[] { "y", "b" },
             LibraryPickTopN: BlibAssayWriter.PeaksPerSpectrum,
             PeptideMinLength: minLen,
-            PeptideMaxLength: maxLen);
+            PeptideMaxLength: maxLen,
+            FullScanAcquisitionMethod: acquisitionMethod);
     }
 
     /// <summary>
@@ -129,36 +143,40 @@ public static class SkylineSettingsConfigurator
     public static async Task<ConfigureResult> ConfigureAsync(
         SkylineSession session,
         IReadOnlyList<Candidate> scheduledCandidates,
+        AcquisitionMode mode,
         CancellationToken cancellationToken = default)
     {
-        var rec = Recommend(scheduledCandidates);
+        var rec = Recommend(scheduledCandidates, mode);
 
-        // One RunCommand per concern. Unknown flags get echoed back in
-        // the output text rather than throwing, so we capture each
-        // batch's response and concatenate.
+        // One RunCommand per individual flag. Verified against
+        // pwiz_tools/Skyline/CommandArgs.cs:
+        //
+        //   --pep-min-length / --pep-max-length          (line 1616, 1618)
+        //   --tran-precursor-ion-charges                 (... look near 1530s)
+        //   --tran-product-ion-charges                   (line 1537)
+        //   --tran-product-ion-types                     (line 1540)
+        //   --tran-product-start-ion                     (line 1542)
+        //   --tran-product-end-ion                       (line 1545)
+        //   --library-pick-product-ions=filter           (line 1564, enum: filter)
+        //   --library-product-ions=N                     (line 1560)
+        //
+        // Batches are kept narrow because Skyline's SkylineCmd parser
+        // aborts the entire batch on the first unknown argument (it
+        // prints "Error: Unexpected argument X" and exits). One flag
+        // per batch means any future unknown flag we add by mistake
+        // only loses its own setting, not the ones around it.
         string[][] argBatches =
         {
-            new[]
-            {
-                "--peptide-min-length=" + rec.PeptideMinLength,
-                "--peptide-max-length=" + rec.PeptideMaxLength,
-            },
-            new[]
-            {
-                "--tran-precursor-ion-charges=" + string.Join(",", rec.PrecursorIonCharges),
-                "--tran-product-ion-charges=" + string.Join(",", rec.ProductIonCharges),
-                "--tran-product-ion-types=" + string.Join(",", rec.ProductIonTypes),
-            },
-            new[]
-            {
-                "--tran-product-start-ion=ion 1",
-                "--tran-product-end-ion=last ion",
-            },
-            new[]
-            {
-                "--library-pick-product-ions=filter",
-                "--tran-library-pick-N=" + rec.LibraryPickTopN,
-            },
+            new[] { "--pep-min-length=" + rec.PeptideMinLength },
+            new[] { "--pep-max-length=" + rec.PeptideMaxLength },
+            new[] { "--tran-precursor-ion-charges=" + string.Join(",", rec.PrecursorIonCharges) },
+            new[] { "--tran-product-ion-charges=" + string.Join(",", rec.ProductIonCharges) },
+            new[] { "--tran-product-ion-types=" + string.Join(",", rec.ProductIonTypes) },
+            new[] { "--tran-product-start-ion=ion 1" },
+            new[] { "--tran-product-end-ion=last ion" },
+            new[] { "--library-pick-product-ions=filter" },
+            new[] { "--library-product-ions=" + rec.LibraryPickTopN },
+            new[] { "--full-scan-acquisition-method=" + rec.FullScanAcquisitionMethod },
         };
 
         var collected = new List<string>(argBatches.Length);
