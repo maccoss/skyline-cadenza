@@ -310,7 +310,27 @@ public partial class MainViewModel : ObservableObject
         try
         {
             string assayName = $"Cadenza-{DateTime.UtcNow:yyyyMMdd-HHmmss}";
-            blibPath = await ChooseAssayBlibPathAsync(assayName);
+
+            // Require the Skyline document to be saved so the BLIB
+            // lives next to the .sky file at a stable on-disk path.
+            // Writing to %TEMP% silently looked like it worked (the
+            // RunCommand --add-library-* call reports success) but
+            // Skyline's PeptideSettings.Libraries.LibrarySpecs change
+            // did not stick - the Libraries list appeared empty in
+            // the Peptide Settings dialog. Putting the BLIB next to
+            // the .sky file at a permanent path avoids that and is
+            // also where users expect their assay libraries to live.
+            string? docPath = await TryGetSavedDocumentPathAsync();
+            if (string.IsNullOrWhiteSpace(docPath))
+            {
+                StatusMessage = "Save the Skyline document first (File > Save), "
+                    + "then re-run the push. Cadenza writes the assay BLIB next "
+                    + "to the .sky file so Skyline can persist the library "
+                    + "registration; an unsaved document doesn't have a stable "
+                    + "location to anchor it to.";
+                return;
+            }
+            blibPath = Path.Combine(Path.GetDirectoryName(docPath!)!, assayName + ".blib");
 
             // Step 1: BLIB write + library registration.
             StatusMessage = $"Writing assay BLIB to {Path.GetFileName(blibPath)}...";
@@ -486,23 +506,24 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Decide where to drop the assay BLIB. Defaults next to the active
-    /// Skyline document so the library survives session restarts; falls
-    /// back to <c>%TEMP%</c> when the document path isn't known yet.
+    /// Query Skyline for the active document's on-disk path. Returns
+    /// null if the document hasn't been saved (Skyline returns an
+    /// empty path for unsaved documents), if the path doesn't actually
+    /// exist on disk, or if the RPC call fails.
     /// </summary>
-    private async Task<string> ChooseAssayBlibPathAsync(string assayName)
+    private async Task<string?> TryGetSavedDocumentPathAsync()
     {
-        string? docPath = null;
         try
         {
-            docPath = await Task.Run(() => _skylineSession!.Execute(c => c.GetDocumentPath()));
+            string? docPath = await Task.Run(() => _skylineSession!.Execute(c => c.GetDocumentPath()));
+            if (string.IsNullOrWhiteSpace(docPath)) return null;
+            if (!File.Exists(docPath)) return null;
+            return docPath;
         }
-        catch { /* best effort */ }
-
-        string dir = !string.IsNullOrEmpty(docPath)
-            ? Path.GetDirectoryName(docPath!) ?? Path.GetTempPath()
-            : Path.GetTempPath();
-        return Path.Combine(dir, assayName + ".blib");
+        catch
+        {
+            return null;
+        }
     }
 
 

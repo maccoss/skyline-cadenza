@@ -229,6 +229,49 @@ public class BlibAssayWriterTests
     }
 
     [Fact]
+    public void NormalizeModifiedSequence_ConvertsUniModIdsToMassDeltas()
+    {
+        // Skyline's LibKeyModificationMatcher tries to parse the
+        // bracket contents as a number, so UniMod IDs in BLIB
+        // peptideModSeq throw FormatException. Cadenza translates
+        // them before writing. Mass values must match the UniMod
+        // database (https://www.unimod.org).
+        Assert.Equal("C[+57.021464]PEPTIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("C(UniMod:4)PEPTIDE"));
+        Assert.Equal("C[+57.021464]PEPTIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("_C[UniMod:4]PEPTIDE_"));
+        Assert.Equal("PEPM[+15.994915]TIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("PEPM[UniMod:35]TIDE"));
+        Assert.Equal("PEPS[+79.966331]TIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("PEPS(UniMod:21)TIDE"));
+    }
+
+    [Fact]
+    public void NormalizeModifiedSequence_AlreadyMassDelta_PassesThrough()
+    {
+        // If the input is already in mass-delta form, the only
+        // transformation is the leading + sign for positive values
+        // when the source omitted it.
+        Assert.Equal("C[+57.021464]PEPTIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("C[+57.021464]PEPTIDE"));
+        Assert.Equal("C[+57.0]PEPTIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("C[57.0]PEPTIDE"));
+        Assert.Equal("C[-0.984016]PEPTIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("C[-0.984016]PEPTIDE"));
+    }
+
+    [Fact]
+    public void NormalizeModifiedSequence_UnknownUniModId_LeavesItForSkylineToReport()
+    {
+        // For UniMod IDs we don't recognise, pass them through
+        // verbatim so Skyline's error message points at the actual
+        // offending ID instead of a translated mass that hides the
+        // root cause.
+        Assert.Equal("C[UniMod:99999]PEPTIDE",
+            BlibAssayWriter.NormalizeModifiedSequence("C[UniMod:99999]PEPTIDE"));
+    }
+
+    [Fact]
     public void Write_SchemaMatchesReaderExpectations()
     {
         var cands = new[]

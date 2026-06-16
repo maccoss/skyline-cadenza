@@ -514,27 +514,135 @@ public static class BlibAssayWriter
     }
 
     /// <summary>
-    /// Normalise to Skyline's <c>C[UniMod:4]</c> / <c>C[+57.0]</c>-style
-    /// form: square brackets only, no flanking underscores. Matches the
-    /// existing transition-list builder's normalisation so a BLIB built
-    /// here parses identically to one Skyline would build itself.
+    /// Normalise to BLIB's expected mass-delta form: square brackets
+    /// only, no flanking underscores, and any <c>[UniMod:N]</c>
+    /// identifiers converted to their mass-delta equivalent
+    /// (<c>C[UniMod:4]</c> -&gt; <c>C[+57.021464]</c>). BiblioSpec's
+    /// library reader (<c>LibKeyModificationMatcher</c>) parses the
+    /// bracket contents as a numeric mass delta and throws
+    /// <c>FormatException: The number 'UniMod:4' is not in the correct
+    /// format</c> when it sees a UniMod ID instead. DIA-NN and Carafe
+    /// both emit UniMod IDs in their modified sequences; we translate
+    /// them here so a BLIB Cadenza writes reads cleanly through
+    /// Skyline's Library Explorer.
     /// </summary>
     internal static string NormalizeModifiedSequence(string modSeq)
     {
         if (string.IsNullOrEmpty(modSeq)) return modSeq;
         var sb = new StringBuilder(modSeq.Length);
-        foreach (var ch in modSeq)
+        int i = 0;
+        while (i < modSeq.Length)
         {
-            switch (ch)
+            char ch = modSeq[i];
+            if (ch == '_')
             {
-                case '_': break;
-                case '(': sb.Append('['); break;
-                case ')': sb.Append(']'); break;
-                default: sb.Append(ch); break;
+                i++;
+                continue;
             }
+            if (ch == '(' || ch == '[')
+            {
+                char close = ch == '(' ? ')' : ']';
+                int end = modSeq.IndexOf(close, i + 1);
+                if (end < 0)
+                {
+                    // Unmatched bracket - copy the rest verbatim.
+                    sb.Append(modSeq, i, modSeq.Length - i);
+                    break;
+                }
+                string inside = modSeq.Substring(i + 1, end - i - 1);
+                string converted = ConvertModBracketContent(inside);
+                sb.Append('[').Append(converted).Append(']');
+                i = end + 1;
+                continue;
+            }
+            sb.Append(ch);
+            i++;
         }
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Convert the content of a modification bracket to BLIB's
+    /// mass-delta form. Already-numeric values pass through unchanged
+    /// (preserving any "+" / "-" sign); <c>UniMod:N</c> identifiers
+    /// are translated via <see cref="UniModMassDeltas"/>; anything
+    /// unrecognised is left as-is so a downstream parse error has a
+    /// chance of pointing at the actual offending string instead of
+    /// our rewrite.
+    /// </summary>
+    private static string ConvertModBracketContent(string inside)
+    {
+        if (string.IsNullOrEmpty(inside)) return inside;
+
+        // Numeric (with optional + / - prefix): pass through, optionally
+        // adding the leading + so BLIB readers consistently see a sign.
+        if (double.TryParse(inside,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out double already))
+        {
+            return already >= 0 && inside[0] != '+'
+                ? "+" + inside
+                : inside;
+        }
+
+        if (inside.StartsWith("UniMod:", StringComparison.OrdinalIgnoreCase))
+        {
+            string idStr = inside.Substring("UniMod:".Length);
+            if (int.TryParse(idStr,
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int unimodId)
+                && UniModMassDeltas.TryGetValue(unimodId, out double mass))
+            {
+                string sign = mass >= 0 ? "+" : "";
+                return sign + mass.ToString("0.0#######",
+                    System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        return inside;
+    }
+
+    /// <summary>
+    /// UniMod ID -&gt; monoisotopic mass delta in Da. The set covers
+    /// modifications routinely seen in bottom-up tryptic proteomics
+    /// workflows that Cadenza ingests from DIA-NN, Carafe, and Skyline.
+    /// Values match the canonical UniMod database (https://www.unimod.org).
+    /// Unknown IDs pass through unchanged - <c>LibKeyModificationMatcher</c>
+    /// will then fail loudly with the actual UniMod string in the
+    /// error so we can extend this list.
+    /// </summary>
+    private static readonly Dictionary<int, double> UniModMassDeltas = new()
+    {
+        { 1,    42.010565 },  // Acetyl
+        { 2,    14.015650 },  // Amidated
+        { 3,   162.052824 },  // Biotin (variant - not the linker; use 64 for ICAT)
+        { 4,    57.021464 },  // Carbamidomethyl
+        { 5,    43.005814 },  // Carbamyl
+        { 6,    58.005479 },  // Carboxymethyl
+        { 7,    -0.984016 },  // Deamidated
+        { 21,   79.966331 },  // Phospho
+        { 24,   71.037114 },  // Propionyl
+        { 26,   39.994915 },  // Pyro-carbamidomethyl
+        { 27,   -18.010565 }, // Glu->pyro-Glu
+        { 28,   -17.026549 }, // Gln->pyro-Glu
+        { 34,    14.015650 }, // Methyl
+        { 35,    15.994915 }, // Oxidation
+        { 36,    28.031300 }, // Dimethyl
+        { 37,    42.046950 }, // Trimethyl
+        { 39,    45.987721 }, // Methylthio (S-methylthio cys)
+        { 121,  114.042927 }, // GlyGly (ubiquitin remnant)
+        { 188,    6.020129 }, // Label:13C(6)
+        { 199,    8.014199 }, // Label:13C(6)15N(2) (often labeled Heavy K)
+        { 259,    8.014199 }, // Label:13C(6)15N(2) (canonical UniMod id)
+        { 267,   10.008269 }, // Label:13C(6)15N(4) (Heavy R)
+        { 425,   15.994915 }, // Hydroxyl (same mass as Oxidation, different annotation)
+        { 730,  144.105918 }, // TMT0 (rare; representative)
+        { 737,  229.162932 }, // TMT 6-plex / 10-plex / 11-plex
+        { 738,  225.155833 }, // TMT2-plex (representative)
+        { 2016, 304.207146 }, // TMTpro 16-plex
+    };
 
     private static string Sanitize(string s) =>
         Regex.Replace(s, @"[^A-Za-z0-9_\-]", "_");

@@ -42,7 +42,11 @@ public static class SkylineSettingsConfigurator
         string FullScanAcquisitionMethod,
         string? FullScanIsolationScheme,
         string RetentionTimeFilter,
-        double RetentionTimeFilterToleranceMin)
+        double RetentionTimeFilterToleranceMin,
+        string PrecursorIsotopes,
+        int PrecursorIsotopeCount,
+        string PrecursorAnalyzer,
+        double PrecursorMassAccuracyPpm)
     {
         /// <summary>
         /// Short single-line description for the status bar.
@@ -52,6 +56,8 @@ public static class SkylineSettingsConfigurator
             + (FullScanIsolationScheme is null
                 ? ""
                 : $"isolation scheme '{FullScanIsolationScheme}', ")
+            + $"MS1 isotopes {PrecursorIsotopeCount} (M+0..M+{PrecursorIsotopeCount - 1}) "
+            + $"@ {PrecursorAnalyzer} {PrecursorMassAccuracyPpm:0} ppm, "
             + $"RT filter {RetentionTimeFilter} ±{RetentionTimeFilterToleranceMin:0.0} min, "
             + $"precursor charges {{{string.Join(",", PrecursorIonCharges)}}}, "
             + $"product charges {{{string.Join(",", ProductIonCharges)}}}, "
@@ -164,14 +170,29 @@ public static class SkylineSettingsConfigurator
         return new Recommendation(
             PrecursorIonCharges: precursorCharges,
             ProductIonCharges: fragmentCharges,
-            ProductIonTypes: new[] { "y", "b" },
+            // y/b are the assay's actual fragment families; we also
+            // include p (precursor) so Skyline keeps the precursor m/z
+            // tracked as an MS1 reference transition. The transition
+            // list Cadenza imports only carries y/b rows, so adding p
+            // here is additive for the document's transition picker -
+            // it doesn't change anything we push.
+            ProductIonTypes: new[] { "y", "b", "p" },
             LibraryPickTopN: BlibAssayWriter.PeaksPerSpectrum,
             PeptideMinLength: minLen,
             PeptideMaxLength: maxLen,
             FullScanAcquisitionMethod: acquisitionMethod,
             FullScanIsolationScheme: isolationScheme,
             RetentionTimeFilter: "scheduling_windows",
-            RetentionTimeFilterToleranceMin: rtFilterToleranceMin);
+            RetentionTimeFilterToleranceMin: rtFilterToleranceMin,
+            // MS1 filtering: top 3 precursor isotopes (M+0, M+1, M+2)
+            // on a centroided analyzer at 10 ppm. Matches the standard
+            // PRM / MTM workflow on Orbitrap / Stellar; these values
+            // came from Mike's working Transition Settings > Full-Scan
+            // dialog.
+            PrecursorIsotopes: "Count",
+            PrecursorIsotopeCount: 3,
+            PrecursorAnalyzer: "centroided",
+            PrecursorMassAccuracyPpm: 10);
     }
 
     /// <summary>
@@ -261,6 +282,24 @@ public static class SkylineSettingsConfigurator
         batchList.Add(new[] { "--full-scan-rt-filter-tolerance="
             + rec.RetentionTimeFilterToleranceMin.ToString(
                 "0.0", System.Globalization.CultureInfo.InvariantCulture) });
+        // MS1 isotope filter: top N precursor isotopes on a centroided
+        // analyzer at 10 ppm. Bundled into a single RunCommand call
+        // because Skyline's TransitionFullScan.DoValidate runs against
+        // the combined end state: PrecursorIsotopes != None requires
+        // the analyzer + resolution to be configured at the same time
+        // (ValidateRes(PrecursorMassAnalyzer, PrecursorRes,
+        // PrecursorResMz) at TransitionSettings.cs line 2881). Setting
+        // them individually trips the same kind of mutual-lockout we
+        // hit on DIA + Isolation scheme.
+        batchList.Add(new[]
+        {
+            "--full-scan-precursor-isotopes=" + rec.PrecursorIsotopes,
+            "--full-scan-precursor-threshold=" + rec.PrecursorIsotopeCount.ToString(
+                System.Globalization.CultureInfo.InvariantCulture),
+            "--full-scan-precursor-analyzer=" + rec.PrecursorAnalyzer,
+            "--full-scan-precursor-res=" + rec.PrecursorMassAccuracyPpm.ToString(
+                "0.#", System.Globalization.CultureInfo.InvariantCulture),
+        });
         string[][] argBatches = batchList.ToArray();
 
         var collected = new List<string>(argBatches.Length);

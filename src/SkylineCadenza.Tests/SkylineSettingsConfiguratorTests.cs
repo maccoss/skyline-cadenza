@@ -55,11 +55,15 @@ public class SkylineSettingsConfiguratorTests
     }
 
     [Fact]
-    public void Recommend_DefaultsToYbIonTypes()
+    public void Recommend_DefaultsToYbpIonTypes()
     {
         var cands = new[] { Make("PEPTIDE", 2, new FragmentIon(200, 100, 1)) };
         var rec = SkylineSettingsConfigurator.Recommend(cands, AcquisitionMode.Mtm);
-        Assert.Equal(new[] { "y", "b" }, rec.ProductIonTypes.ToArray());
+        // y + b are the actual fragment families; p (precursor) is
+        // included so the precursor m/z stays in the document's
+        // transition picker even though Cadenza's pushed transition
+        // list only carries y/b rows.
+        Assert.Equal(new[] { "y", "b", "p" }, rec.ProductIonTypes.ToArray());
     }
 
     [Fact]
