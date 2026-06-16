@@ -392,7 +392,8 @@ public partial class MainViewModel : ObservableObject
                 + $"{writeResult.RefSpectraWritten:n0} peptides. "
                 + "Aligning document peptide + transition filter...";
             var settingsResult = await SkylineSettingsConfigurator.ConfigureAsync(
-                _skylineSession!, scheduledCands, Mode);
+                _skylineSession!, scheduledCands, Mode,
+                firingPadMin: FiringPadSec / 60.0);
             var recommendation = settingsResult.Recommendation;
             string settingsTail = string.IsNullOrWhiteSpace(settingsResult.SkylineOutput)
                 ? "OK"

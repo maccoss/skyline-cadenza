@@ -39,13 +39,20 @@ public static class SkylineSettingsConfigurator
         int LibraryPickTopN,
         int PeptideMinLength,
         int PeptideMaxLength,
-        string FullScanAcquisitionMethod)
+        string FullScanAcquisitionMethod,
+        string? FullScanIsolationScheme,
+        string RetentionTimeFilter,
+        double RetentionTimeFilterToleranceMin)
     {
         /// <summary>
         /// Short single-line description for the status bar.
         /// </summary>
         public string ToStatusLine() =>
             $"acquisition method {FullScanAcquisitionMethod}, "
+            + (FullScanIsolationScheme is null
+                ? ""
+                : $"isolation scheme '{FullScanIsolationScheme}', ")
+            + $"RT filter {RetentionTimeFilter} ±{RetentionTimeFilterToleranceMin:0.0} min, "
             + $"precursor charges {{{string.Join(",", PrecursorIonCharges)}}}, "
             + $"product charges {{{string.Join(",", ProductIonCharges)}}}, "
             + $"ion types {{{string.Join(",", ProductIonTypes)}}}, "
@@ -79,16 +86,28 @@ public static class SkylineSettingsConfigurator
     }
 
     /// <summary>
-    /// Compute the recommendation from the scheduled candidates and the
-    /// acquisition mode the assay was scheduled under. PRM mode maps to
-    /// Skyline's <c>PRM</c> acquisition method; MTM maps to <c>DIA</c>
-    /// since MTM is multiplexed-targeted DIA from Skyline's perspective
-    /// (each MS/MS spectrum carries multiple co-isolated precursors,
-    /// which is what Skyline's DIA chromatogram extractor expects).
+    /// Compute the recommendation from the scheduled candidates, the
+    /// acquisition mode, and the firing-pad value used at scheduling
+    /// time.
+    /// <list type="bullet">
+    /// <item>PRM mode -&gt; Skyline's <c>PRM</c> acquisition method, no
+    /// isolation scheme (each precursor has its own quadrupole window).</item>
+    /// <item>MTM mode -&gt; <c>DIA</c> acquisition method + isolation
+    /// scheme <c>"Results only"</c>. MTM is multiplexed-targeted DIA
+    /// from Skyline's perspective (each MS/MS spectrum carries multiple
+    /// co-isolated precursors), and we don't pre-specify isolation
+    /// windows because Cadenza schedules them per slot - Skyline reads
+    /// them from the imported result files.</item>
+    /// </list>
+    /// The RT filter is <c>scheduling_windows</c> (uses the BLIB's
+    /// library RT as the prediction); the tolerance is the assay's
+    /// worst-case half-width from apex to peak edge, padded by
+    /// <paramref name="firingPadMin"/>, rounded up to 0.1 min.
     /// </summary>
     public static Recommendation Recommend(
         IReadOnlyList<Candidate> scheduledCandidates,
-        AcquisitionMode mode)
+        AcquisitionMode mode,
+        double firingPadMin = 0.25)
     {
         var precursorCharges = scheduledCandidates
             .Select(c => c.PrecursorCharge)
@@ -114,6 +133,23 @@ public static class SkylineSettingsConfigurator
         int maxLen = lengths.Count == 0 ? 30 : Math.Min(60, lengths.Max());
 
         string acquisitionMethod = mode == AcquisitionMode.Prm ? "PRM" : "DIA";
+        string? isolationScheme = mode == AcquisitionMode.Prm ? null : "Results only";
+
+        // RT filter tolerance: worst-case half-width from apex to peak
+        // edge across the scheduled assay, plus the firing pad, rounded
+        // up to 0.1 min. The floor of 0.2 min keeps the tolerance large
+        // enough to be useful even when every peptide has a near-zero
+        // measured peak width (typically a synthesized fallback).
+        double maxHalfWidth = 0;
+        foreach (var c in scheduledCandidates)
+        {
+            double belowApex = c.RtApex - c.RtStart;
+            double aboveApex = c.RtStop - c.RtApex;
+            double half = Math.Max(belowApex, aboveApex);
+            if (half > maxHalfWidth) maxHalfWidth = half;
+        }
+        double rawTolerance = maxHalfWidth + firingPadMin;
+        double rtFilterToleranceMin = Math.Max(0.2, Math.Ceiling(rawTolerance * 10) / 10);
 
         return new Recommendation(
             PrecursorIonCharges: precursorCharges,
@@ -122,7 +158,10 @@ public static class SkylineSettingsConfigurator
             LibraryPickTopN: BlibAssayWriter.PeaksPerSpectrum,
             PeptideMinLength: minLen,
             PeptideMaxLength: maxLen,
-            FullScanAcquisitionMethod: acquisitionMethod);
+            FullScanAcquisitionMethod: acquisitionMethod,
+            FullScanIsolationScheme: isolationScheme,
+            RetentionTimeFilter: "scheduling_windows",
+            RetentionTimeFilterToleranceMin: rtFilterToleranceMin);
     }
 
     /// <summary>
@@ -144,9 +183,10 @@ public static class SkylineSettingsConfigurator
         SkylineSession session,
         IReadOnlyList<Candidate> scheduledCandidates,
         AcquisitionMode mode,
+        double firingPadMin = 0.25,
         CancellationToken cancellationToken = default)
     {
-        var rec = Recommend(scheduledCandidates, mode);
+        var rec = Recommend(scheduledCandidates, mode, firingPadMin);
 
         // One RunCommand per individual flag. Verified against
         // pwiz_tools/Skyline/CommandArgs.cs:
@@ -165,7 +205,7 @@ public static class SkylineSettingsConfigurator
         // prints "Error: Unexpected argument X" and exits). One flag
         // per batch means any future unknown flag we add by mistake
         // only loses its own setting, not the ones around it.
-        string[][] argBatches =
+        var batchList = new List<string[]>
         {
             new[] { "--pep-min-length=" + rec.PeptideMinLength },
             new[] { "--pep-max-length=" + rec.PeptideMaxLength },
@@ -177,7 +217,21 @@ public static class SkylineSettingsConfigurator
             new[] { "--library-pick-product-ions=filter" },
             new[] { "--library-product-ions=" + rec.LibraryPickTopN },
             new[] { "--full-scan-acquisition-method=" + rec.FullScanAcquisitionMethod },
+            // RT filter: tell Skyline to extract chromatograms within
+            // the assay's worst-case half-width of each peptide's
+            // BLIB-derived predicted apex.
+            new[] { "--full-scan-rt-filter=" + rec.RetentionTimeFilter },
+            new[] { "--full-scan-rt-filter-tolerance=" + rec.RetentionTimeFilterToleranceMin.ToString(
+                "0.0", System.Globalization.CultureInfo.InvariantCulture) },
         };
+        // Isolation scheme only applies to DIA mode (MTM); PRM uses the
+        // quadrupole isolation set per acquisition and doesn't need a
+        // scheme.
+        if (rec.FullScanIsolationScheme is not null)
+        {
+            batchList.Add(new[] { "--full-scan-isolation-scheme=" + rec.FullScanIsolationScheme });
+        }
+        string[][] argBatches = batchList.ToArray();
 
         var collected = new List<string>(argBatches.Length);
         foreach (var args in argBatches)
