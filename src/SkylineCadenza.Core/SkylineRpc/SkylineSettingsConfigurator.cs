@@ -227,17 +227,33 @@ public static class SkylineSettingsConfigurator
             new[] { "--library-pick-product-ions=filter" },
             new[] { "--library-product-ions=" + rec.LibraryPickTopN },
         };
-        // Isolation scheme MUST come before --full-scan-acquisition-method
-        // = DIA: Skyline validates that an isolation scheme with a
-        // width is already in place when the acquisition method
-        // switches to DIA, and rejects the change otherwise with
-        // "An isolation window width value is required in DIA mode."
-        // PRM doesn't need a scheme so we skip it entirely there.
+        // DIA mode + isolation scheme are mutually constrained and must
+        // be sent in a single RunCommand call so Skyline validates the
+        // end state, not each intermediate. Splitting them deadlocks:
+        // - Setting --full-scan-isolation-scheme alone while the
+        //   document is still in AcquisitionMethod = None throws
+        //   "No other full-scan MS/MS filter settings are allowed
+        //   when precursor filter is none" (rejected silently with no
+        //   stdout echo).
+        // - Setting --full-scan-acquisition-method=DIA alone while
+        //   IsolationScheme is still null throws "An isolation window
+        //   width value is required in DIA mode."
+        // Bundling them lets Skyline apply both fields and run
+        // DoValidate once against the final (DIA + Results only)
+        // state which is the valid configuration. PRM mode has no
+        // isolation scheme so we just send the acquisition method.
         if (rec.FullScanIsolationScheme is not null)
         {
-            batchList.Add(new[] { "--full-scan-isolation-scheme=" + rec.FullScanIsolationScheme });
+            batchList.Add(new[]
+            {
+                "--full-scan-isolation-scheme=" + rec.FullScanIsolationScheme,
+                "--full-scan-acquisition-method=" + rec.FullScanAcquisitionMethod,
+            });
         }
-        batchList.Add(new[] { "--full-scan-acquisition-method=" + rec.FullScanAcquisitionMethod });
+        else
+        {
+            batchList.Add(new[] { "--full-scan-acquisition-method=" + rec.FullScanAcquisitionMethod });
+        }
         // RT filter: tell Skyline to extract chromatograms within
         // the assay's worst-case half-width of each peptide's
         // BLIB-derived predicted apex.
