@@ -14,7 +14,7 @@ The scheduler reads these fields off each `Candidate`:
 - Identity: `PrecursorId`, `StrippedSequence`, `ModifiedSequence`,
   `PrecursorCharge`, `PrecursorMz`.
 - Peak: `RtApex`, `RtStart`, `RtStop` (unpadded; the scheduler adds
-  `FiringPadSec` on top).
+  its time padding on top as a drift buffer).
 - Quality: `QValue`, `ProteinQValue`. Used for filtering and for
   protein-ranking when `ProteinPriority.ProteinQValue` is selected.
 - Quantity: `PrecursorQuantity`. Used for peptide-ranking and for the
@@ -75,7 +75,7 @@ spectral library Carafe produces from a target protein list).
 - Peak: `RtApex` from `Tr_recalibrated` (Carafe's predicted apex).
   `RtStart` / `RtStop` are SYNTHESISED in `CandidateBuilder.BuildFromCarafe`
   as `RtApex +/- peakHalfWidthMin` (default 0.10 min). The scheduler
-  then layers its `FiringPadSec` on top.
+  then layers its time padding on top.
 - Quality: `QValue = 0.0` (there's no q-value on a prediction; the
   filter is upstream, in Carafe's own training data). `ProteinQValue =
   NaN`.

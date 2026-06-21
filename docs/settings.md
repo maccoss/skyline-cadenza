@@ -78,21 +78,25 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
 - Default: 100.
 - Maximum concurrent acquisition slots at any single RT bin. This is the
   hard load-balancing constraint: the scheduler will refuse to add a
-  peptide whose padded firing window would push any of its RT bins past
-  this number.
+  peptide whose padded scheduling window would push any of its RT bins
+  past this number. (The scheduling window is the peak boundary plus
+  the time padding above.)
 - The budget is per RT bin, not global. A protein with peptides spread
   across the gradient at distinct RTs consumes one slot at each of
   those bins only.
 
-### Firing pad (sec)
+### Time padding (sec)
 
 - Default: 15.0 s (0.25 min).
-- Seconds of padding added on each side of every peak's RT range when
-  computing the slot's firing window. For DIA-NN / Skyline-BLIB ingest
-  the peak boundaries already include per-replicate peak-shape variance
-  (Cadenza takes the union of every replicate's `startTime` /
-  `endTime`), so this pad handles unmodelled drift between the source
-  acquisitions and the new run, NOT the peak shape itself.
+- Extra time added on each side of every peak's RT range when the
+  scheduler builds the scheduling window. This is a drift buffer:
+  the source data's peak boundaries already include per-replicate
+  peak-shape variance, so this padding is for retention-time drift
+  between the source acquisitions and the new run, not for the peak
+  shape itself.
+- The matching code symbol is `SchedulingParameters.FiringPadSec`
+  (kept unrenamed for now to avoid churning the public Core API; the
+  UI label and docs use "time padding").
 
 ### RT bin width (min)
 

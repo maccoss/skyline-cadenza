@@ -57,7 +57,8 @@ runs a single custom report against the live document to fetch one row per
   peptide `startTime` and `endTime` from each BLIB's `RetentionTimes`
   table. Cadenza takes the union of every replicate's boundary (widest
   start, widest stop) as the candidate's `RtStart` / `RtStop`. The
-  scheduler's `FiringPadSec` is then layered on top, NOT on the peak
+  scheduler's time padding (a drift buffer) is then layered on top,
+  NOT on the peak
   shape itself but on cross-acquisition drift between the source data
   and the new run.
 
@@ -96,7 +97,7 @@ user). The BLIB is schema version 8 (the version that introduced
 - `RefSpectra`: one row per scheduled peptide, holding the top-6 library
   fragments as the reference peak list (zlib-compressed BLOBs of
   little-endian doubles for m/z and floats for intensity), plus the
-  candidate's RT apex and the per-replicate firing window
+  candidate's RT apex and the per-replicate scheduling window
   (`startTime` / `endTime` from the BLIB or the scheduler's padded
   window if synthesized).
 - `Modifications`: UniMod IDs in the modified sequence are translated to
