@@ -125,19 +125,32 @@ back to Skyline see [`skyline-integration.md`](skyline-integration.md).
 ### Min peptides per protein
 
 - Default: 1.
-- Best-effort minimum. Groups whose final scheduled count is less than
-  this are dropped (their slots are freed and the load curve is
-  recomputed). Setting Min > 1 is a hard filter, not a target: groups
-  that can't reach it disappear from the assay.
-- In Maximize Proteins, this doubles as the load-up cap: cover one,
-  then top up to Min in load-up, then stop.
+- Hard filter, applied AFTER the load-up loop finishes. Groups whose
+  final scheduled count is below Min are dropped from the assay
+  entirely (their slots are freed and the load curve is recomputed).
+  Setting Min > 1 means "every protein must reach this depth or get
+  cut from the assay"; proteins that can't reach it disappear.
+- Min does NOT participate in the load-up cap. The load-up loop
+  always uses Max as the per-protein ceiling (under Balanced and
+  MaximizeProteins) regardless of Min.
 
 ### Max peptides per protein
 
 - Default: 5.
-- Hard upper bound on scheduled peptides per group during the load-up
-  pass.
-- Ignored under `MaximizePeptides` (the load-up pass is uncapped).
+- Per-protein ceiling for the load-up loop. The load-up loop is
+  breadth-first round-robin: lap 1 brings every covered protein up
+  to 2 peptides where possible, lap 2 to 3, and so on. A protein
+  drops out of the loop on the lap where it either hits Max or runs
+  out of candidates that fit, whichever comes first. Proteins with
+  only 1 or 2 viable peptides stop early and don't block the others
+  from continuing to grow.
+- Honoured by both `Balanced` and `MaximizeProteins`. Under
+  MaximizeProteins, once every coverable protein has its first
+  peptide the load-up loop fills toward Max using whatever cycle
+  budget remains.
+- Ignored under `MaximizePeptides`: the load-up loop keeps going,
+  lap by lap, until either the cycle budget is saturated or every
+  protein has exhausted its candidate queue.
 - Cover-pass behaviour is independent of Max under all objectives, so
   changing Max does not change the protein-coverage curve, only the
   per-protein peptide depth.

@@ -152,10 +152,11 @@ public enum CoverageObjective
     /// scheduled. Look-ahead cover pass: prefers peptides that join an
     /// existing slot (no new slot opened, no cycle budget consumed),
     /// falling back to the least-saturated peptide when no joinable
-    /// option exists. Load-up is capped at
-    /// <see cref="SchedulingParameters.MinPeptidesPerProtein"/> so the
-    /// saved budget stays available for first-peptide coverage of more
-    /// proteins. This is Cadenza's default.
+    /// option exists. After every coverable protein has its first
+    /// peptide, the round-robin load-up fills up to
+    /// <see cref="SchedulingParameters.MaxPeptidesPerProtein"/> per
+    /// group using whatever cycle budget remains. This is Cadenza's
+    /// default.
     /// </summary>
     MaximizeProteins,
 

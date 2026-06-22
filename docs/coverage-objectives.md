@@ -28,12 +28,26 @@ Every objective goes through the same two passes:
 1. **Pass 1 (cover)**: walk through every protein once and try to
    schedule one peptide for it. Smallest proteins first, because they
    have the fewest fallback options.
-2. **Pass 2 (top up)**: walk back through the proteins that got a
-   peptide, and try to add another. Repeat until a full lap adds
-   nothing.
+2. **Pass 2 (top up)**: round-robin across the covered proteins, one
+   lap at a time. On each lap, each protein gets a chance to add at
+   most one more peptide. So lap 1 brings every covered protein up to
+   2 peptides where possible, lap 2 brings every protein up to 3,
+   and so on. A protein drops out of the loop when either (a) it hits
+   its **Max peptides per protein** cap or (b) its candidate queue is
+   exhausted, whichever comes first. The outer loop exits when a
+   full lap goes by without adding anything.
 
-What changes between objectives is (a) **which** peptide pass 1 picks,
-and (b) **how many** peptides pass 2 is allowed to add per protein.
+The breadth-first shape matters when you have many proteins (e.g. 285
+proteins competing for 100 budget slots): no single protein gets
+loaded to Max while others are still at 1. Every protein gets a fair
+shot at its 2nd peptide before any protein gets a 3rd, every protein
+gets a fair shot at its 3rd before any gets a 4th, etc. Proteins with
+only 1 or 2 possible peptides naturally stop early without blocking
+anyone else.
+
+What changes between objectives is (a) **which** peptide pass 1 picks
+and (b) **how many** peptides pass 2 is allowed to add per protein
+(i.e. how Max is treated).
 
 ![Two-pass scheduling](figures/two-pass-shape.png)
 
@@ -101,9 +115,11 @@ Webinar 2024 ("Balancing the Load") and US 11,688,595 B2.
 would push some RT bin over budget, fall back to the next peptide on
 the list. Take the first one that fits.
 
-**Pass 2**: loop through the covered proteins and add a second
-peptide to each, then a third, and so on, up to "Max peptides per
-protein" (default 5).
+**Pass 2**: breadth-first round-robin (see "How scheduling works in
+two passes" above), capped at "Max peptides per protein" (default 5).
+Lap 1 brings every covered protein up to 2 peptides where possible,
+lap 2 to 3, and so on. Proteins with only 1 or 2 candidates stop early
+and don't block the others.
 
 **When to pick this**: when you want a result that matches the
 published algorithm bit for bit, or when you're A/B-testing against
@@ -112,22 +128,29 @@ the original notebook prototype. Otherwise prefer Maximize Proteins.
 ### Maximize Proteins (default)
 
 Cadenza's default. Tries to cover the largest number of distinct
-proteins.
+proteins first, then uses any leftover cycle budget to add more
+peptides per protein.
 
 **Pass 1**: for each protein, first look for a peptide that could
 share a slot with one of the slots already opened earlier in this
 pass; if one exists, take it (it costs no budget). If not, look
 across the protein's whole candidate list and take the peptide whose
 scheduling window touches the **least crowded** RT bins, so it
-displaces the fewest competing peptides.
+displaces the fewest competing peptides. The prefer-joinable rule
+makes coverage cheap: peptides that fit free into an existing slot
+leave more cycle budget available for other proteins.
 
-**Pass 2**: capped at "Min peptides per protein" (default 1, so the
-top-up pass effectively does nothing). The saved budget stays
-available for first-peptide coverage of other proteins.
+**Pass 2**: breadth-first round-robin (see "How scheduling works in
+two passes" above), capped at "Max peptides per protein" (default 5).
+Lap 1 brings every covered protein up to 2 peptides where possible,
+lap 2 to 3, and so on, until either the cycle budget saturates or
+every protein has hit Max or run out of candidates. No single
+protein is loaded to Max before others get their 2nd, 3rd, etc., so a
+high-priority protein cannot starve the rest of the assay.
 
 **When to pick this**: most assays. You want as many proteins as
-possible covered with at least one peptide; you're fine with some
-proteins getting only one.
+possible covered with at least one peptide; any cycle budget left
+after that goes into deeper per-protein coverage.
 
 ### Maximize Peptides
 
@@ -139,12 +162,13 @@ but without the prefer-joinable preference. (Joining is great when
 you're trying to save budget for other proteins; here you'll spend
 the budget on more peptides anyway, so there's no point.)
 
-**Pass 2**: no per-protein cap at all. Cadenza loops through the
-covered proteins one peptide at a time until either the budget is
-saturated everywhere or every protein has run out of candidates.
-Round-robin order is preserved, so a protein never gets its kth+1
-peptide before every other covered protein has had a chance at its
-kth.
+**Pass 2**: breadth-first round-robin (see "How scheduling works in
+two passes" above), with NO per-protein cap. Lap 1 brings every
+covered protein up to 2 peptides where possible, lap 2 to 3, and so
+on, until either the cycle budget saturates everywhere or every
+protein has run out of candidates. As with the other objectives, a
+protein never gets its (k+1)th peptide before every other covered
+protein has had a chance at its kth.
 
 **When to pick this**: when downstream analysis cares about peptide
 count, e.g., pathway-level enrichment, stoichiometry, or
@@ -157,17 +181,16 @@ each objective. This trips users up.
 
 | Objective         | What "Max peptides per protein" does                              |
 | ----------------- | ----------------------------------------------------------------- |
-| Balanced          | This is the per-protein cap in pass 2 (default 5).                |
-| Maximize Proteins | Ignored. Pass 2 stops at "Min peptides per protein" (default 1).  |
+| Balanced          | Per-protein cap in pass 2 (default 5).                            |
+| Maximize Proteins | Per-protein cap in pass 2 (default 5).                            |
 | Maximize Peptides | Ignored. Pass 2 keeps going until the budget saturates.           |
 
-So if you're in Maximize Proteins and you increase the Max slider but
-the protein-coverage curve doesn't move, that's expected, not a bug:
-in this objective, Max isn't the cap. To get more peptides per
-protein, increase Min instead. In Balanced the Max slider does change
-the per-protein depth in pass 2, but pass 1 (which sets the
-protein-coverage count) is unaffected, so the coverage curve still
-won't move.
+A note on what changing Max does to the **coverage curve** (i.e., the
+number of distinct proteins scheduled): under Balanced and Maximize
+Proteins, pass 1 sets coverage and pass 2 only affects per-protein
+depth, so increasing Max adds peptides to already-covered proteins
+but doesn't add new proteins. If your protein-coverage count looks
+unchanged after raising Max, that's expected.
 
 ## Why pass 1 goes smallest proteins first
 
@@ -229,3 +252,16 @@ is Pass 2. The cover strategy under Maximize Proteins is called
 Peptides it's "look-ahead" without the prefer-joinable preference;
 under Balanced it's "reactive" (walk top to bottom, take the first
 peptide that fits). See `Scheduler.cs` for the actual code.
+
+The load-up loop's breadth-first round-robin is implemented as nested
+`while (true)` / `foreach (groupOrder)` / `while (cursor < queue)`
+with a `break` after a successful schedule. The outer `while` is the
+lap; the foreach gives each protein one chance per lap; the `break`
+ensures at most one peptide is added per protein per lap. The outer
+loop exits when an entire lap goes by without a schedule. Within a
+lap, the protein order is `groupOrder` (target-list members > protein
+priority > smallest-queue-first > alphabetical), so when two proteins
+contest the same RT bin the earlier one in that order wins that lap.
+The lap structure still guarantees the runner-up gets a chance at
+its next peptide before the winner attempts another one, so this
+order-based tiebreak doesn't compound across laps in a runaway way.

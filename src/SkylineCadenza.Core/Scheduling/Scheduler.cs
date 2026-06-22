@@ -399,14 +399,21 @@ public static class Scheduler
         var coveredGroups = new HashSet<string>();
         // Effective load-up cap by objective:
         //   Balanced         - user's MaxPeptidesPerProtein.
-        //   MaximizeProteins - clamp to Min so saved budget stays free for
-        //                      other proteins' first peptide.
-        //   MaximizePeptides - no per-group cap; round-robin order in the
-        //                      load-up loop preserves fairness.
+        //   MaximizeProteins - user's MaxPeptidesPerProtein. The cover
+        //                      pass is single-pass, so once coverage
+        //                      converges there's no future cover pass
+        //                      to save budget for. Capping load-up
+        //                      below Max would leave cycle budget on
+        //                      the table after every protein had had
+        //                      its first peptide; load-up should fill
+        //                      to Max instead. The difference vs
+        //                      Balanced is the cover-pass strategy
+        //                      (prefer-joinable), not the load-up cap.
+        //   MaximizePeptides - no per-group cap; round-robin order in
+        //                      the load-up loop preserves fairness.
         int rawMax = Math.Max(1, parameters.MaxPeptidesPerProtein);
         int effectiveMaxPerGroup = parameters.Objective switch
         {
-            CoverageObjective.MaximizeProteins => Math.Max(1, parameters.MinPeptidesPerProtein),
             CoverageObjective.MaximizePeptides => int.MaxValue,
             _ => rawMax,
         };
@@ -546,12 +553,18 @@ public static class Scheduler
             }
         }
 
-        // Pass 2+: load-up loop. Always runs; the per-Objective
-        // effectiveMaxPerGroup cap above decides how much it adds:
-        //   Balanced         -> cap = MaxPeptidesPerProtein.
-        //   MaximizeProteins -> cap = MinPeptidesPerProtein (default
-        //                       Min = 1 means load-up is effectively
-        //                       a no-op).
+        // Pass 2+: load-up loop. Breadth-first round-robin across
+        // proteins: each outer iteration is one "lap" through every
+        // covered protein, and each protein adds AT MOST ONE peptide
+        // per lap. So after K laps every protein has been given K
+        // chances at adding its next peptide. A protein drops out of
+        // the loop when it either hits its cap or its candidate queue
+        // runs dry. The outer while exits when a full lap adds
+        // nothing.
+        //
+        // Per-Objective cap (effectiveMaxPerGroup, computed above):
+        //   Balanced         -> cap = MaxPeptidesPerProtein (default 5).
+        //   MaximizeProteins -> cap = MaxPeptidesPerProtein (default 5).
         //   MaximizePeptides -> cap = int.MaxValue.
         {
             while (true)

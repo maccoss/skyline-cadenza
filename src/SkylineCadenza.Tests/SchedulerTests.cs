@@ -359,15 +359,18 @@ public class SchedulerTests
     }
 
     [Fact]
-    public void Load_up_adds_extra_peptides_under_Balanced_but_not_under_MaximizeProteins_with_default_Min()
+    public void Load_up_fills_to_Max_under_both_Balanced_and_MaximizeProteins()
     {
         // One protein, three candidates that don't overlap in RT. Cover
-        // pass schedules the highest-score one; the load-up cap is what
-        // decides whether the others get added.
+        // pass schedules the highest-score one; the load-up loop then
+        // adds the remaining two up to MaxPeptidesPerProtein (default
+        // 5) as long as the cycle budget allows.
         //
-        // Balanced load-up cap = Max (default 5) -> all three schedule.
-        // MaximizeProteins load-up cap = Min (default 1) -> only the
-        // cover-pass pick survives.
+        // Both Balanced and MaximizeProteins cap load-up at Max, so
+        // both should end up scheduling all three peptides here. The
+        // difference between these objectives is in the cover-pass
+        // strategy (MaximizeProteins prefers peptides that join an
+        // existing slot), not in the load-up cap.
         var cands = new[]
         {
             Make("A", 500.0, 5.0, 5.4, "G1", quantity: 1e8),
@@ -387,6 +390,76 @@ public class SchedulerTests
         });
 
         Assert.Equal(3, balanced.ScheduledIndices.Length);
-        Assert.Single(maxProteins.ScheduledIndices);
+        Assert.Equal(3, maxProteins.ScheduledIndices.Length);
+    }
+
+    [Fact]
+    public void Load_up_distributes_peptides_breadth_first_across_proteins()
+    {
+        // Five proteins, three candidates each, all at distinct
+        // non-overlapping RTs. Generous cycle budget so every peptide
+        // could fit. After cover pass each protein has 1; the
+        // breadth-first round-robin load-up should bring every
+        // protein up to Max = 3 in lockstep, not load any single
+        // protein to Max before others get their 2nd peptide.
+        var cands = new List<Candidate>();
+        string[] proteins = { "G1", "G2", "G3", "G4", "G5" };
+        double rt = 5.0;
+        foreach (var g in proteins)
+        {
+            for (int j = 0; j < 3; j++)
+            {
+                cands.Add(Make(
+                    id: $"{g}_p{j}",
+                    mz: 400.0 + rt * 10,
+                    rtStart: rt,
+                    rtStop: rt + 0.3,
+                    group: g,
+                    quantity: 1e9 - rt));
+                rt += 0.8;
+            }
+        }
+
+        var result = Scheduler.Run(cands.ToArray(), new SchedulingParameters
+        {
+            CycleBudget = 100,
+            Objective = CoverageObjective.MaximizeProteins,
+            MaxPeptidesPerProtein = 3,
+        });
+
+        var perGroup = result.ScheduledIndices
+            .GroupBy(i => cands[i].ProteinGroup)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        Assert.Equal(proteins.Length, perGroup.Count);
+        foreach (var g in proteins)
+            Assert.Equal(3, perGroup[g]);
+        Assert.Equal(15, result.ScheduledIndices.Length);
+    }
+
+    [Fact]
+    public void MaximizeProteins_load_up_honours_MaxPeptidesPerProtein()
+    {
+        // One protein, five candidates that don't overlap in RT and
+        // would all fit individually inside the cycle budget. The cover
+        // pass takes the best-scoring one; load-up should fill the rest
+        // up to Max = 3, not all 5.
+        var cands = new[]
+        {
+            Make("A", 500.0, 5.0, 5.4, "G1", quantity: 5e8),
+            Make("B", 600.0, 6.0, 6.4, "G1", quantity: 4e8),
+            Make("C", 700.0, 7.0, 7.4, "G1", quantity: 3e8),
+            Make("D", 800.0, 8.0, 8.4, "G1", quantity: 2e8),
+            Make("E", 900.0, 9.0, 9.4, "G1", quantity: 1e8),
+        };
+
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            Objective = CoverageObjective.MaximizeProteins,
+            MaxPeptidesPerProtein = 3,
+        });
+
+        Assert.Equal(3, result.ScheduledIndices.Length);
     }
 }
