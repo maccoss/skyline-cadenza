@@ -9,6 +9,14 @@ namespace SkylineCadenza.Core.SkylineRpc;
 /// </summary>
 /// <remarks>
 /// <para>
+/// Column headers match the Thermo Mass List Table import schema exactly:
+/// <c>Compound, Formula, Adduct, m/z, z, t start (min), t stop (min),
+/// Isolation Window (m/z), HCD Collision Energy</c>. Earlier versions
+/// used <c>t (min) / Window (min) / Normalized CE</c>; Method Editor
+/// could not map those to its columns and silently fell back to a
+/// 0-to-end-of-gradient window for every entry.
+/// </para>
+/// <para>
 /// PRM mode: one row per scheduled precursor (PRM has 1 precursor / slot).
 /// </para>
 /// <para>
@@ -20,11 +28,10 @@ namespace SkylineCadenza.Core.SkylineRpc;
 /// configured PRM / solo-slot width).
 /// </para>
 /// <para>
-/// The slot's <c>t (min)</c> is the unpadded co-elution apex (midpoint of
-/// <see cref="Slot.CoStart"/> and <see cref="Slot.CoStop"/>) and
-/// <c>Window (min)</c> is the full padded firing window width
-/// (<see cref="Slot.RtStop"/> - <see cref="Slot.RtStart"/>) so Thermo
-/// keeps the window on for the same interval the scheduler costed.
+/// The slot's <c>t start (min)</c> and <c>t stop (min)</c> are the padded
+/// scheduling window boundaries (<see cref="Slot.RtStart"/> and
+/// <see cref="Slot.RtStop"/>), so the instrument watches the same
+/// interval the scheduler costed against the cycle budget.
 /// </para>
 /// </remarks>
 public static class ThermoCsvWriter
@@ -44,10 +51,10 @@ public static class ThermoCsvWriter
             "Adduct",
             "m/z",
             "z",
-            "t (min)",
-            "Window (min)",
+            "t start (min)",
+            "t stop (min)",
             "Isolation Window (m/z)",
-            "Normalized CE"));
+            "HCD Collision Energy"));
 
         var inv = CultureInfo.InvariantCulture;
         double prmWidth = parameters.PrmIsolationWidthTh > 0 ? parameters.PrmIsolationWidthTh : prmIsolationWidthTh;
@@ -67,8 +74,8 @@ public static class ThermoCsvWriter
                     compound: $"{c.StrippedSequence}+{c.PrecursorCharge}",
                     mz: c.PrecursorMz,
                     z: c.PrecursorCharge,
-                    tMin: c.RtApex,
-                    windowMin: slot.RtStop - slot.RtStart,
+                    tStartMin: slot.RtStart,
+                    tStopMin: slot.RtStop,
                     isolationWidth: prmWidth,
                     nce: nce, inv: inv);
             }
@@ -102,19 +109,12 @@ public static class ThermoCsvWriter
             // Solo slots collapse to prmWidth.
             double isolationWidth = memberSpan + prmWidth;
 
-            // Use the co-elution midpoint when meaningful (CoStart < CoStop
-            // is guaranteed by the scheduler's strict-co-elution check),
-            // otherwise fall back to the firing-window midpoint.
-            double tMin = slot.CoStart < slot.CoStop
-                ? (slot.CoStart + slot.CoStop) / 2.0
-                : (slot.RtStart + slot.RtStop) / 2.0;
-
             AppendRow(sb,
                 compound: string.Join(CompoundJoinSeparator, memberNames),
                 mz: mzCenter,
                 z: z,
-                tMin: tMin,
-                windowMin: slot.RtStop - slot.RtStart,
+                tStartMin: slot.RtStart,
+                tStopMin: slot.RtStop,
                 isolationWidth: isolationWidth,
                 nce: nce, inv: inv);
         }
@@ -122,18 +122,19 @@ public static class ThermoCsvWriter
     }
 
     private static void AppendRow(StringBuilder sb,
-        string compound, double mz, int z, double tMin,
-        double windowMin, double isolationWidth, double nce,
+        string compound, double mz, int z,
+        double tStartMin, double tStopMin,
+        double isolationWidth, double nce,
         CultureInfo inv)
     {
         sb.AppendLine(string.Join(",",
             Csv(compound),
             "",                                  // Formula (peptides are not elemental)
-            "[M+H]",
+            "",                                  // Adduct (z column carries it for peptides)
             mz.ToString("0.0000", inv),
             z.ToString(inv),
-            tMin.ToString("0.0000", inv),
-            windowMin.ToString("0.0000", inv),
+            tStartMin.ToString("0.0000", inv),
+            tStopMin.ToString("0.0000", inv),
             isolationWidth.ToString("0.0000", inv),
             nce.ToString("0.0", inv)));
     }
