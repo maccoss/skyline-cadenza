@@ -57,7 +57,7 @@ public class ThermoCsvWriterTests
             NormalizedCollisionEnergy = 22.0,
         });
 
-        var lines = csv.Trim().Split('\n');
+        var lines = csv.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(
             "Compound,Formula,Adduct,m/z,z,"
             + "t start (min),t stop (min),"
@@ -87,7 +87,7 @@ public class ThermoCsvWriterTests
             FiringPadSec = 15.0,
         });
 
-        var rows = csv.Trim().Split('\n');
+        var rows = csv.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(2, rows.Length); // header + 1 row
         var fields = rows[1].Split(',');
         // Header positions: 0 Compound, 1 Formula, 2 Adduct, 3 m/z,
@@ -119,7 +119,8 @@ public class ThermoCsvWriterTests
             PrmIsolationWidthTh = 0.7,
         });
 
-        var fields = csv.Trim().Split('\n')[1].Split(',');
+        var rows3 = csv.Split(new[] { "\r\n", "\n" }, System.StringSplitOptions.RemoveEmptyEntries);
+        var fields = rows3[1].Split(',');
         Assert.Equal(string.Empty, fields[1]); // Formula
         Assert.Equal(string.Empty, fields[2]); // Adduct
     }
