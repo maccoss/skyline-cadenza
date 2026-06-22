@@ -298,12 +298,28 @@ public static class Scheduler
         }
 
         bool hasTargets = parameters.TargetProteins.Count > 0;
+
+        // Match a candidate's protein group against the user's target set.
+        // Skyline-document ingest carries the full Skyline protein name
+        // (e.g. "sp|P55011|S12A2_HUMAN") as the group identifier, while
+        // ProteinListParser extracts bare accessions ("P55011") from FASTA
+        // headers. Without normalisation Exclusive mode silently drops
+        // every group whose name carries the pipe-prefix, so we also try
+        // the extracted accession on a miss.
+        bool IsTargetGroup(string group)
+        {
+            if (parameters.TargetProteins.Contains(group)) return true;
+            string accession = Ingest.ProteinListParser.ExtractAccession(group);
+            return !ReferenceEquals(accession, group)
+                && parameters.TargetProteins.Contains(accession);
+        }
+
         if (hasTargets && parameters.TargetMode == TargetListMode.Exclusive)
         {
             var keep = new Dictionary<string, List<int>>();
             foreach (var (group, idxs) in groupToRanked)
             {
-                if (parameters.TargetProteins.Contains(group))
+                if (IsTargetGroup(group))
                     keep[group] = idxs;
             }
             groupToRanked = keep;
@@ -359,8 +375,7 @@ public static class Scheduler
         int TargetRank(string group)
         {
             if (!hasTargets) return 0;
-            if (parameters.TargetProteins.Contains(group)) return 0;
-            return 1;
+            return IsTargetGroup(group) ? 0 : 1;
         }
 
         int PriorityRank(string group)

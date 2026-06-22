@@ -359,6 +359,62 @@ public class SchedulerTests
     }
 
     [Fact]
+    public void Exclusive_target_list_matches_bare_accession_against_UniProt_style_group()
+    {
+        // Skyline-document ingest carries the full Skyline protein name
+        // (e.g. "sp|P55011|S12A2_HUMAN") on each candidate's
+        // ProteinGroup, while ProteinListParser extracts bare accessions
+        // ("P55011") from FASTA target lists. Exclusive mode used to
+        // exact-string Contains, dropping every UniProt-style group
+        // silently; the filter now normalises one side so the
+        // intersection actually happens.
+        var cands = new[]
+        {
+            Make("PEP1", 500.0, 5.0, 5.4, "sp|P55011|S12A2_HUMAN"),
+            Make("PEP2", 600.0, 6.0, 6.4, "sp|P55011|S12A2_HUMAN"),
+            Make("PEP3", 700.0, 7.0, 7.4, "sp|Q9NZW4|DSPP_HUMAN"),
+            Make("PEP4", 800.0, 8.0, 8.4, "sp|P12345|FOOBAR_HUMAN"),
+        };
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            TargetProteins = new HashSet<string> { "P55011", "Q9NZW4" },
+            TargetMode = TargetListMode.Exclusive,
+        });
+
+        // P12345 should be excluded; the other two should be present.
+        var groupsCovered = result.ScheduledIndices
+            .Select(i => cands[i].ProteinGroup).Distinct().ToHashSet();
+        Assert.Equal(2, groupsCovered.Count);
+        Assert.Contains("sp|P55011|S12A2_HUMAN", groupsCovered);
+        Assert.Contains("sp|Q9NZW4|DSPP_HUMAN", groupsCovered);
+        Assert.DoesNotContain("sp|P12345|FOOBAR_HUMAN", groupsCovered);
+    }
+
+    [Fact]
+    public void Exclusive_target_list_still_works_when_group_is_bare_accession()
+    {
+        // Regression check: don't break the existing path where the
+        // candidate's ProteinGroup is already a bare accession (DIA-NN
+        // path, Carafe path).
+        var cands = new[]
+        {
+            Make("PEP1", 500.0, 5.0, 5.4, "P55011"),
+            Make("PEP2", 600.0, 6.0, 6.4, "P12345"),
+        };
+        var result = Scheduler.Run(cands, new SchedulingParameters
+        {
+            CycleBudget = 100,
+            TargetProteins = new HashSet<string> { "P55011" },
+            TargetMode = TargetListMode.Exclusive,
+        });
+        var groupsCovered = result.ScheduledIndices
+            .Select(i => cands[i].ProteinGroup).Distinct().ToHashSet();
+        Assert.Single(groupsCovered);
+        Assert.Contains("P55011", groupsCovered);
+    }
+
+    [Fact]
     public void Load_up_fills_to_Max_under_both_Balanced_and_MaximizeProteins()
     {
         // One protein, three candidates that don't overlap in RT. Cover

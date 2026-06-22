@@ -146,9 +146,13 @@ public static class ProteinListParser
     /// <summary>
     /// Extract the bare accession from a UniProt-style identifier such as
     /// <c>sp|P55011|S12A2_HUMAN</c> or <c>tr|A0A075B5J9|...</c>. Returns the
-    /// input unchanged if it doesn't look like that format.
+    /// input unchanged if it doesn't look like that format. Exposed so the
+    /// scheduler's target-list filter can normalise both sides of the
+    /// comparison when a candidate's protein group is a full Skyline
+    /// protein name and the target list is bare accessions (or vice
+    /// versa).
     /// </summary>
-    private static string ExtractAccession(string id)
+    public static string ExtractAccession(string id)
     {
         if (id.Length > 3 && (id.StartsWith("sp|", StringComparison.Ordinal) ||
                               id.StartsWith("tr|", StringComparison.Ordinal)))
